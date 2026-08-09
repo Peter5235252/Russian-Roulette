@@ -1,0 +1,6 @@
+{
+  "name": "Russian Roulette: Abyss",
+  "description": "An intense, dark psychological horror Russian Roulette game with unique mechanics and randomized chambers.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
