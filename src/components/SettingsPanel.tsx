@@ -703,6 +703,22 @@ export function SettingsPanel({ difficulty = 'NORMAL', onClose }: SettingsPanelP
                     <span className="bg-neutral-800 px-2 py-0.5 rounded-none text-amber-400 font-bold border border-amber-800/80">1 - 8</span>
                   </div>
                   <div className="p-2.5 rounded-none bg-neutral-900 border border-neutral-800 flex justify-between items-center">
+                    <span>Bluff / Taunt the Dealer</span>
+                    <span className="bg-neutral-800 px-2 py-0.5 rounded-none text-fuchsia-400 font-bold border border-fuchsia-800/80">F</span>
+                  </div>
+                  <div className="p-2.5 rounded-none bg-neutral-900 border border-neutral-800 flex justify-between items-center">
+                    <span>Load Round into Cylinder</span>
+                    <span className="bg-neutral-800 px-2 py-0.5 rounded-none text-emerald-400 font-bold border border-emerald-800/80">CLICK + DRAG</span>
+                  </div>
+                  <div className="p-2.5 rounded-none bg-neutral-900 border border-neutral-800 flex justify-between items-center">
+                    <span>Spin Cylinder</span>
+                    <span className="bg-neutral-800 px-2 py-0.5 rounded-none text-emerald-400 font-bold border border-emerald-800/80">CLICK + DRAG</span>
+                  </div>
+                  <div className="p-2.5 rounded-none bg-neutral-900 border border-neutral-800 flex justify-between items-center">
+                    <span>Quick Load / Auto Load</span>
+                    <span className="bg-neutral-800 px-2 py-0.5 rounded-none text-amber-400 font-bold border border-amber-800/80">SPACE / ENTER</span>
+                  </div>
+                  <div className="p-2.5 rounded-none bg-neutral-900 border border-neutral-800 flex justify-between items-center">
                     <span>Market / Shop View</span>
                     <span className="bg-neutral-800 px-2 py-0.5 rounded-none text-amber-400 font-bold border border-amber-800/80">Q / ↓, ↑</span>
                   </div>

@@ -6,7 +6,7 @@ import { fsr1 } from 'three/examples/jsm/tsl/display/FSR1Node.js';
 import { sharpen } from 'three/examples/jsm/tsl/display/SharpenNode.js';
 import { motion } from 'motion/react';
 import { GameState, Chamber, PlayerState, ItemType } from '../types';
-import { playBulletLoad, playPurchaseSound, playSyringeCap, playSyringeSlam, playThumpSound, playTapSound } from '../audio';
+import { playBulletLoad, playPurchaseSound, playSyringeCap, playSyringeSlam, playThumpSound, playTapSound, playEmptyClick, playCockSound } from '../audio';
 import { getControllerSettings } from '../controller';
 import { createWebGPURenderer, isWebGPUSupported } from '../renderers/RendererManager';
 import { updateGamepads, vibrateGamepad } from '../controller';
@@ -31,6 +31,13 @@ interface Arena3DProps {
   buyItem: (type: ItemType, cost: number) => void;
   playerDamageReductionEnd: number | null;
   dealerDamageReductionEnd: number | null;
+  loadingPhase: 'pickup' | 'spin';
+  bulletsInserted: number;
+  bulletTargetCount: number;
+  bluffActiveTurns: number;
+  onBulletInserted: () => void;
+  onSpinComplete: (index: number) => void;
+  onAutoLoad: () => void;
 }
 
 const ITEM_DESCS: Record<string, string> = {
@@ -65,6 +72,13 @@ export function Arena3D({
   buyItem,
   playerDamageReductionEnd,
   dealerDamageReductionEnd,
+  loadingPhase,
+  bulletsInserted,
+  bulletTargetCount,
+  bluffActiveTurns,
+  onBulletInserted,
+  onSpinComplete,
+  onAutoLoad,
 }: Arena3DProps) {
   const [inputType, setInputType] = useState<'kbm' | 'gamepad'>('kbm');
   const [graphics, setGraphics] = useState({
@@ -227,6 +241,10 @@ export function Arena3D({
     dealerFlinchTime: 0,
     isTouchActive: false,
     graphics,
+    loadingPhase,
+    bulletsInserted,
+    bulletTargetCount,
+    bluffActiveTurns,
   });
 
   useEffect(() => {
@@ -251,6 +269,10 @@ export function Arena3D({
       dealerFlinchTime: stateRef.current.dealerFlinchTime,
       isTouchActive: stateRef.current.isTouchActive,
       graphics,
+      loadingPhase,
+      bulletsInserted,
+      bulletTargetCount,
+      bluffActiveTurns,
     };
   }, [
     gameState,
@@ -269,6 +291,10 @@ export function Arena3D({
     playerDamageReductionEnd,
     dealerDamageReductionEnd,
     graphics,
+    loadingPhase,
+    bulletsInserted,
+    bulletTargetCount,
+    bluffActiveTurns,
   ]);
 
   // Persist animation state across prop updates to prevent double-animations
@@ -325,7 +351,33 @@ export function Arena3D({
     instantiatedPlayerCount: 0,
     instantiatedDealerCount: 0,
     rebuildRequired: false,
-    prevMuzzleWorldPos: null as THREE.Vector3 | null
+    prevMuzzleWorldPos: null as THREE.Vector3 | null,
+    // --- INTERACTIVE MANUAL LOADING SYSTEM ---
+    loadingSceneBuilt: false,
+    ammoBlock: null as THREE.Group | null,
+    loadBullets: [] as THREE.Group[],
+    slotMarkers: [] as THREE.Object3D[],
+    filledSlots: [] as boolean[],
+    slotHighlight: null as THREE.Mesh | null,
+    spinZone: null as THREE.Mesh | null,
+    spinProxy: null as THREE.Group | null,
+    spinParts: [] as THREE.Object3D[],
+    carriedBulletIdx: -1,
+    isDraggingBullet: false,
+    dragLastPoint: null as THREE.Vector3 | null,
+    highlightedSlot: -1,
+    insertAnims: [] as { bullet: THREE.Group; from: THREE.Vector3; to: THREE.Vector3; t: number }[],
+    returnAnims: [] as { bullet: THREE.Group; from: THREE.Vector3; to: THREE.Vector3; t: number }[],
+    propQuat: null as THREE.Quaternion | null,
+    propPos: null as THREE.Vector3 | null,
+    spinGestureActive: false,
+    spinAngle: 0,
+    spinVel: 0,
+    spinLastAngle: 0,
+    spinLastTime: 0,
+    spinSettled: false,
+    spinRatchetSector: 0,
+    loadCamInit: false,
   });
 
   useEffect(() => {
@@ -333,6 +385,9 @@ export function Arena3D({
 
     const container = containerRef.current;
     const canvas = canvasRef.current;
+
+    // --- ANIMATION / INTERACTION STATES moved to animRef (early: fixtures use it) ---
+    const ar = animRef.current;
 
     // --- MATERIALS (CONSOLIDATED AT TOP) ---
     const rustySteelMat = new THREE.MeshStandardMaterial({
@@ -956,6 +1011,31 @@ export function Arena3D({
       return parent;
     };
 
+    // Shared pulsing red glow outline used to mark the currently selected /
+    // hovered item. Edges trace the ACTUAL curves of the item's own geometry
+    // (torus, cylinder, box edges...) by attaching edge lines directly to each
+    // child mesh — they inherit every parent transform automatically.
+    const outlineMatRed = new THREE.LineBasicMaterial({
+      color: 0xff2a2a,
+      transparent: true,
+      opacity: 0.9,
+      depthTest: false,
+    });
+    const addRedOutline = (itemObj: THREE.Group) => {
+      const outlines: THREE.LineSegments[] = [];
+      itemObj.traverse((child) => {
+        if (child instanceof THREE.Mesh && child.geometry) {
+          const edgeGeo = new THREE.EdgesGeometry(child.geometry, 18);
+          const lines = new THREE.LineSegments(edgeGeo, outlineMatRed);
+          lines.renderOrder = 100;
+          lines.visible = false;
+          child.add(lines);
+          outlines.push(lines);
+        }
+      });
+      itemObj.userData.outlines = outlines;
+    };
+
     // --- SETUP THREE.JS ---
     const scene = new THREE.Scene();
     scene.fog = new THREE.FogExp2(0x110808, 0.035);
@@ -1258,6 +1338,7 @@ export function Arena3D({
       itemMesh.scale.set(1.5, 1.5, 1.5); 
       itemMesh.rotation.y = 0; // Face the camera (+X)
       itemMesh.userData = { isShopItem: true, type: itemInfo.type, cost: itemInfo.cost };
+      addRedOutline(itemMesh);
       
       // Price tag - angled physical label
       const tagTexture = createTextTexture(`${itemInfo.cost}B`, '#0a0a0a', '#00ff44');
@@ -1585,13 +1666,21 @@ export function Arena3D({
     gunGroup.add(lanyardRingMesh);
 
     // Revolver Cylinder (Drum) inside the frame - High Poly Cylinder
+    // The drum + its flutes + rims all live in ONE proxy group so that the
+    // manual cylinder spin (and chamber indexing) rotates the entire physical
+    // cylinder assembly as a single rigid body.
+    const spinProxy = new THREE.Group();
+    spinProxy.position.set(0, 0.12, -0.05);
+    gunGroup.add(spinProxy);
+    ar.spinProxy = spinProxy;
+
     const cylDrumGeo = new THREE.CylinderGeometry(0.18, 0.18, 0.38, drumSegments);
     cylDrumGeo.rotateX(Math.PI / 2);
     const revolverCylinderMesh = new THREE.Mesh(cylDrumGeo, gunMetalMat);
-    revolverCylinderMesh.position.set(0, 0.12, -0.05);
+    revolverCylinderMesh.position.set(0, 0, 0);
     revolverCylinderMesh.castShadow = true;
     revolverCylinderMesh.receiveShadow = true;
-    gunGroup.add(revolverCylinderMesh);
+    spinProxy.add(revolverCylinderMesh);
 
     // Cylinder flutes (Hollow-like indents for bullet slots)
     const fluteGeo = new THREE.CylinderGeometry(0.042, 0.042, 0.4, isHighPoly ? 12 : 6);
@@ -1602,10 +1691,12 @@ export function Arena3D({
       const flute = new THREE.Mesh(fluteGeo, darkLinerMat);
       flute.position.set(
         Math.sin(angle) * r,
-        0.12 + Math.cos(angle) * r,
-        -0.05
+        Math.cos(angle) * r,
+        0
       );
-      gunGroup.add(flute);
+      flute.castShadow = true;
+      spinProxy.add(flute);
+      ar.spinParts.push(flute);
 
       // Recessed brass cartridge rims visible inside cylinder chambers
       const rimGeo = new THREE.CylinderGeometry(0.046, 0.046, 0.02, 16);
@@ -1613,10 +1704,10 @@ export function Arena3D({
       const brassRim = new THREE.Mesh(rimGeo, brassAccentMat);
       brassRim.position.set(
         Math.sin(angle) * r,
-        0.12 + Math.cos(angle) * r,
-        -0.24
+        Math.cos(angle) * r,
+        -0.19
       );
-      gunGroup.add(brassRim);
+      spinProxy.add(brassRim);
     }
 
     // Ejector ratchet star gear on cylinder rear
@@ -1625,6 +1716,52 @@ export function Arena3D({
     const ejectorStarMesh = new THREE.Mesh(ejectorStarGeo, polishedSteelMat);
     ejectorStarMesh.position.set(0, 0.12, -0.25);
     gunGroup.add(ejectorStarMesh);
+
+    // --- MANUAL LOADING FIXTURES (slot markers, highlight ring, spin zone) ---
+    // Invisible per-chamber markers inside the spinning proxy: their world
+    // positions are the "mouths" the player drops rounds into.
+    ar.slotMarkers = [];
+    for (let i = 0; i < 6; i++) {
+      const angle = (i / 6) * Math.PI * 2;
+      const marker = new THREE.Object3D();
+      marker.position.set(
+        Math.sin(angle) * 0.11,
+        Math.cos(angle) * 0.11,
+        0.14
+      );
+      spinProxy.add(marker);
+      marker.userData.slotIdx = i;
+      ar.slotMarkers.push(marker);
+    }
+
+    // Glowing highlight ring shown above the nearest empty chamber while
+    // the player carries a round.
+    const slotHighlightGeo = new THREE.TorusGeometry(0.05, 0.007, 10, 28);
+    const slotHighlightMat = new THREE.MeshBasicMaterial({
+      color: 0x57ff8a,
+      transparent: true,
+      opacity: 0.9,
+    });
+    const slotHighlight = new THREE.Mesh(slotHighlightGeo, slotHighlightMat);
+    slotHighlight.rotation.x = Math.PI / 2;
+    slotHighlight.visible = false;
+    spinProxy.add(slotHighlight);
+    ar.slotHighlight = slotHighlight;
+
+    // Transparent click-catcher over the cylinder for the spin gesture.
+    const spinZoneGeo = new THREE.CircleGeometry(0.21, 32);
+    const spinZoneMat = new THREE.MeshBasicMaterial({
+      transparent: true,
+      opacity: 0.0001,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const spinZone = new THREE.Mesh(spinZoneGeo, spinZoneMat);
+    spinZone.position.set(0, 0, 0);
+    spinZone.rotation.x = Math.PI / 2;
+    spinProxy.add(spinZone);
+    spinZone.userData.isSpinZone = true;
+    ar.spinZone = spinZone;
 
     // Heavy direct cylinder barrel pointing positive Z (+Z)
     const barrelGeo = new THREE.CylinderGeometry(0.072, 0.065, 0.9, barrelSegments);
@@ -1693,6 +1830,116 @@ export function Arena3D({
     const guardMesh = new THREE.Mesh(guardGeo, gunMetalMat);
     guardMesh.position.set(0, -0.05, -0.1);
     gunGroup.add(guardMesh);
+
+    // --- MANUAL LOADING AMMO BLOCK + HIGHLY REALISTIC BULLET MODEL ---
+    // Smoky polished-brass cased round with a copper-jacketed round-nose slug,
+    // standing muzzle-up in a wooden loading block on the table.
+    const brassCaseMat = new THREE.MeshStandardMaterial({
+      color: 0xb4842f,
+      roughness: 0.28,
+      metalness: 0.95,
+    });
+    const brassRimMat = new THREE.MeshStandardMaterial({
+      color: 0x8a671f,
+      roughness: 0.4,
+      metalness: 0.9,
+    });
+    const primerMat = new THREE.MeshStandardMaterial({
+      color: 0x4a0e0e,
+      roughness: 0.5,
+      metalness: 0.6,
+    });
+    const copperSlugMat = new THREE.MeshStandardMaterial({
+      color: 0xc2793f,
+      roughness: 0.32,
+      metalness: 0.88,
+    });
+
+    const createBullet = (): THREE.Group => {
+      const g = new THREE.Group();
+      const caseGeo = new THREE.CylinderGeometry(0.026, 0.034, 0.20, 24);
+      caseGeo.rotateX(Math.PI / 2);
+      const caseMesh = new THREE.Mesh(caseGeo, brassCaseMat);
+      caseMesh.position.y = 0.11;
+      caseMesh.castShadow = true;
+      caseMesh.receiveShadow = true;
+      g.add(caseMesh);
+
+      const rimGeo = new THREE.CylinderGeometry(0.040, 0.040, 0.018, 24);
+      rimGeo.rotateX(Math.PI / 2);
+      const rimMesh = new THREE.Mesh(rimGeo, brassRimMat);
+      rimMesh.position.y = 0.009;
+      g.add(rimMesh);
+
+      const primerGeo = new THREE.CylinderGeometry(0.012, 0.012, 0.02, 12);
+      primerGeo.rotateX(Math.PI / 2);
+      const primerMesh = new THREE.Mesh(primerGeo, primerMat);
+      primerMesh.position.y = 0.002;
+      g.add(primerMesh);
+
+      const slugGeo = new THREE.CylinderGeometry(0.024, 0.030, 0.085, 24);
+      slugGeo.rotateX(Math.PI / 2);
+      const slugMesh = new THREE.Mesh(slugGeo, copperSlugMat);
+      slugMesh.position.y = 0.253;
+      slugMesh.castShadow = true;
+      g.add(slugMesh);
+
+      const noseGeo = new THREE.SphereGeometry(0.030, 24, 14, 0, Math.PI * 2, 0, Math.PI / 2);
+      noseGeo.rotateZ(Math.PI / 2);
+      noseGeo.scale(1, 1, 0.9);
+      const noseMesh = new THREE.Mesh(noseGeo, copperSlugMat);
+      noseMesh.position.y = 0.325;
+      noseMesh.castShadow = true;
+      g.add(noseMesh);
+
+      g.userData.isLoadBullet = true;
+      g.visible = false;
+      return g;
+    };
+
+    // Wooden loading block with six drilled holes; rounds rest muzzle-up.
+    const ammoBlock = new THREE.Group();
+    ammoBlock.position.set(-0.5, 0.56, 0.2);
+    ammoBlock.rotation.y = 0.35;
+    ammoBlock.visible = false;
+    scene.add(ammoBlock);
+    ar.ammoBlock = ammoBlock;
+
+    const blockBodyGeo = new THREE.BoxGeometry(0.52, 0.07, 0.3);
+    const blockBody = new THREE.Mesh(blockBodyGeo, stockMat);
+    blockBody.position.y = 0.035;
+    blockBody.castShadow = true;
+    blockBody.receiveShadow = true;
+    ammoBlock.add(blockBody);
+
+    const blockLipGeo = new THREE.BoxGeometry(0.56, 0.02, 0.34);
+    const blockLip = new THREE.Mesh(blockLipGeo, stockMat);
+    blockLip.position.y = 0.076;
+    blockLip.castShadow = true;
+    ammoBlock.add(blockLip);
+
+    const blockHoleGeo = new THREE.CylinderGeometry(0.038, 0.038, 0.02, 16);
+    const blockHoles: THREE.Mesh[] = [];
+    for (let i = 0; i < 6; i++) {
+      const hole = new THREE.Mesh(blockHoleGeo, darkLinerMat);
+      hole.position.set(-0.135 + i * 0.054, 0.085, 0);
+      ammoBlock.add(hole);
+      blockHoles.push(hole);
+    }
+
+    const blockSlotPos = (i: number) =>
+      new THREE.Vector3(-0.135 + i * 0.054, 0.135, 0).applyMatrix4(ammoBlock.matrixWorld);
+
+    ar.loadBullets = [];
+    for (let i = 0; i < 6; i++) {
+      const bullet = createBullet();
+      const slot = blockSlotPos(i);
+      bullet.position.copy(slot);
+      bullet.rotation.y = Math.random() * Math.PI * 2;
+      ammoBlock.add(bullet);
+      bullet.userData.bulletIdx = i;
+      ar.loadBullets.push(bullet);
+    }
 
 
     // --- 3D INTERACTIVE CONTROL plaques ON TABLE ---
@@ -2108,6 +2355,7 @@ export function Arena3D({
 
         // Stamp interactive metadata on all sub-meshes for recursive hit validation
         itemObj.userData = { isPlayerItem: true, index: idx };
+        addRedOutline(itemObj);
 
         playerItemsGrp.add(itemObj);
         playerItemMeshes.push(itemObj);
@@ -2142,12 +2390,61 @@ export function Arena3D({
     const mouse = new THREE.Vector2();
     let hoveredMesh: THREE.Object3D | null = null;
 
+    // TEMP-DEBUG (remove): expose runtime scene state for CDP verification.
+    (window as any).__rr = {
+      scene,
+      camera,
+      ammoBlock,
+      get camPos() { return camera.position.toArray().map((n: number) => +n.toFixed(3)); },
+      get camVec() { return stateRef.current.camPosVec ? stateRef.current.camPosVec.toArray().map((n: number) => +n.toFixed(3)) : null; },
+      get look() { return stateRef.current.lookTargetVec ? stateRef.current.lookTargetVec.toArray().map((n: number) => +n.toFixed(3)) : null; },
+      get gun() {
+        gunGroup.updateMatrixWorld(true);
+        let yMin = 999;
+        gunGroup.traverse((c) => {
+          if (c instanceof THREE.Mesh) {
+            const b = new THREE.Box3().setFromObject(c);
+            yMin = Math.min(yMin, b.min.y);
+          }
+        });
+        return { pos: gunGroup.position.toArray().map((n: number) => +n.toFixed(3)), yMin: +yMin.toFixed(3) };
+      },
+      get ammoWorld() { ammoBlock.updateMatrixWorld(true); return ammoBlock.getWorldPosition(new THREE.Vector3()).toArray().map((n: number) => +n.toFixed(3)); },
+      get bullets() {
+        return ar.loadBullets.filter((b) => b.visible)
+          .map((b) => { const v = new THREE.Vector3(); b.getWorldPosition(v); return v.toArray().map((n: number) => +n.toFixed(2)); });
+      },
+      get dbg() {
+        return {
+          loadingSceneBuilt: ar.loadingSceneBuilt,
+          ammoVis: !!ammoBlock.visible,
+          dbgAmmoId: (ammoBlock as any).id,
+          blockDbgId: (window as any).__rrDbgAmmoId,
+          loadBulletsLen: ar.loadBullets.length,
+          bulletVis: ar.loadBullets.map((b) => b.visible),
+          filledSlots: ar.filledSlots,
+          phase: stateRef.current.loadingPhase,
+        };
+      },
+      get slot0() { if (ar.slotMarkers && ar.slotMarkers[0]) { const v = new THREE.Vector3(); ar.slotMarkers[0].getWorldPosition(v); return v.toArray().map((n: number) => +n.toFixed(2)); } return null; },
+      get spinW() { if (ar.spinZone) { const v = new THREE.Vector3(); ar.spinZone.getWorldPosition(v); return v.toArray().map((n: number) => +n.toFixed(2)); } return null; },
+      get state() { return { gameState: stateRef.current.gameState, phase: stateRef.current.loadingPhase, seeded: stateRef.current.bulletsInserted, target: stateRef.current.bulletTargetCount }; },
+      get stateVec3() { return { lookTargetVec: stateRef.current.lookTargetVec?.toArray().map((n: number) => +n.toFixed(2) as any) ?? null }; },
+    };
+
     const getRaycastTargets = () => {
       const list: THREE.Object3D[] = [];
       if (playerSelfPad) list.push(playerSelfPad);
       list.push(dealerGroup);
       list.push(...playerItemMeshes);
       list.push(...shopItemMeshes);
+      if (stateRef.current.gameState === 'LOADING') {
+        if (stateRef.current.loadingPhase === 'pickup') {
+          list.push(...ar.loadBullets.filter((b) => b.visible));
+        } else if (ar.spinZone) {
+          list.push(ar.spinZone);
+        }
+      }
       return list;
     };
 
@@ -2436,7 +2733,7 @@ export function Arena3D({
 
 
     // --- ANIMATION / INTERACTION STATES moved to animRef ---
-    const ar = animRef.current;
+    // Fixtures created earlier (drum spin proxy, load bullets) already use 'ar'.
 
     // Table resting coordinates: physically resting flat on its side on the table surface
     const initialGunPos = new THREE.Vector3(0, 0.57, -0.4);
@@ -2606,7 +2903,19 @@ export function Arena3D({
       if (target) {
         document.body.style.cursor = 'pointer';
 
-        if (target.userData.isPlayerItem) {
+        if (target.userData.isLoadBullet) {
+          setHoveredInfo({
+            type: 'LOAD_BULLET',
+            name: 'ROUND',
+            description: 'CLICK A ROUND AND DRAG IT INTO AN OPEN CYLINDER CHAMBER.',
+          });
+        } else if (target.userData.isSpinZone) {
+          setHoveredInfo({
+            type: 'SPIN',
+            name: 'CYLINDER',
+            description: 'CLICK AND DRAG ACROSS THE CYLINDER TO SPIN IT. WATCH THE CHAMBERS RATCHET.',
+          });
+        } else if (target.userData.isPlayerItem) {
           const idx = target.userData.index;
           const userItemsArr = stateRef.current.player.items;
           const itemName = userItemsArr[idx];
@@ -2708,6 +3017,204 @@ export function Arena3D({
       }
       if (updateGamepads() !== null) return;
       handleMouseUpRaw(e.clientX, e.clientY);
+      finalizeLoadingDrag(e.clientX, e.clientY);
+    };
+
+    // --- INTERACTIVE MANUAL LOADING DRAG & DROP (bullets + cylinder spin) ---
+    const setBulletWorld = (bullet: THREE.Group, worldPos: THREE.Vector3) => {
+      ammoBlock.updateMatrixWorld(true);
+      bullet.position.copy(ammoBlock.worldToLocal(worldPos.clone()));
+    };
+
+    const getPointerRay = (clientX: number, clientY: number) => {
+      const rect = canvas.getBoundingClientRect();
+      mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+      mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(mouse, camera);
+      return raycaster.ray;
+    };
+
+    // World point of the cylinder axis (center of the chamber ring).
+    const getCylinderAxisWorld = () => {
+      const v = new THREE.Vector3();
+      if (ar.spinProxy) ar.spinProxy.getWorldPosition(v);
+      return v;
+    };
+
+    const getPointerAngleAroundAxis = (clientX: number, clientY: number) => {
+      const ray = getPointerRay(clientX, clientY);
+      const axis = getCylinderAxisWorld();
+      const ref = new THREE.Vector3();
+      if (ar.slotMarkers[0]) ar.slotMarkers[0].getWorldPosition(ref);
+      const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(new THREE.Vector3(0, 1, 0), ref);
+      const pt = new THREE.Vector3();
+      ray.intersectPlane(plane, pt);
+      return Math.atan2(pt.x - axis.x, pt.z - axis.z);
+    };
+
+    const updateCarriedBullet = (clientX: number, clientY: number) => {
+      const latest = stateRef.current;
+      if (latest.gameState !== 'LOADING' || latest.loadingPhase !== 'pickup') return;
+      const bullet = ar.loadBullets[ar.carriedBulletIdx];
+      if (!bullet) return;
+
+      const ray = getPointerRay(clientX, clientY);
+      const camDir = new THREE.Vector3();
+      camera.getWorldDirection(camDir);
+      const axis = getCylinderAxisWorld();
+      const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(camDir.clone().negate(), axis);
+      const pt = new THREE.Vector3();
+      if (!ray.intersectPlane(plane, pt)) return;
+
+      // Hold the round at arm's reach in front of the camera ray.
+      setBulletWorld(bullet, pt.clone().addScaledVector(camDir, 0.18));
+      bullet.rotation.z = Math.sin(performance.now() / 70) * 0.05;
+      bullet.rotation.y = 0;
+
+      // Nearest open chamber mouth becomes the highlight target.
+      let best = -1;
+      let bestD = 0.17;
+      ar.slotMarkers.forEach((m, i) => {
+        if (ar.filledSlots[i]) return;
+        const wp = new THREE.Vector3();
+        m.getWorldPosition(wp);
+        const d = wp.distanceTo(pt);
+        if (d < bestD) {
+          bestD = d;
+          best = i;
+        }
+      });
+      ar.highlightedSlot = best;
+    };
+
+    const placeHighlight = () => {
+      if (!ar.slotHighlight) return;
+      if (ar.highlightedSlot >= 0 && !ar.filledSlots[ar.highlightedSlot]) {
+        const marker = ar.slotMarkers[ar.highlightedSlot];
+        ar.slotHighlight.position.copy(marker.position);
+        ar.slotHighlight.position.z += 0.035;
+        ar.slotHighlight.visible = true;
+      } else {
+        ar.slotHighlight.visible = false;
+      }
+    };
+
+    const dropCarriedBullet = (clientX: number, clientY: number) => {
+      const latest = stateRef.current;
+      const bullet = ar.loadBullets[ar.carriedBulletIdx];
+      ar.highlightedSlot = -1;
+      if (ar.slotHighlight) ar.slotHighlight.visible = false;
+      ar.carriedBulletIdx = -1;
+
+      if (!bullet || !bullet.visible) return;
+
+      // Raycast the drop point (mouseup may be over the cylinder holes).
+      updateCarriedBullet(clientX, clientY);
+      const dropIdx = ar.highlightedSlot;
+      ar.highlightedSlot = -1;
+      if (ar.slotHighlight) ar.slotHighlight.visible = false;
+      if (latest.gameState === 'LOADING' && latest.loadingPhase === 'pickup' && dropIdx >= 0) {
+        const marker = ar.slotMarkers[dropIdx];
+        const target = new THREE.Vector3();
+        marker.getWorldPosition(target);
+        const axis = new THREE.Vector3();
+        marker.getWorldDirection(axis); // points out of the chamber mouth
+        ar.filledSlots[dropIdx] = true;
+        const finalPos = target.clone().addScaledVector(axis, -0.20);
+        ar.insertAnims.push({ bullet, from: bullet.position.clone(), to: ammoBlock.worldToLocal(finalPos.clone()), t: 0 });
+        playBulletLoad();
+        spawnParticles(target, 0xffcc00, 6, 0.06, 0.002, 'SPARK');
+        vibrateGamepad('jolt', { duration: 45, weak: 0.1, strong: 0.9 });
+        onBulletInserted();
+      } else {
+        ar.returnAnims.push({ bullet, from: bullet.position.clone(), to: blockSlotLocal(bullet.userData.bulletIdx ?? 0), t: 0 });
+      }
+    };
+
+    const blockSlotLocal = (i: number) =>
+      new THREE.Vector3(-0.135 + i * 0.054, 0.135, 0);
+
+    const updateSpinGesture = (clientX: number, clientY: number) => {
+      const latest = stateRef.current;
+      if (latest.gameState !== 'LOADING' || latest.loadingPhase !== 'spin') return;
+      const angle = getPointerAngleAroundAxis(clientX, clientY);
+      const now = performance.now();
+      const dt = Math.max(0.001, (now - ar.spinLastTime) / 1000);
+      let delta = angle - ar.spinLastAngle;
+      while (delta > Math.PI) delta -= Math.PI * 2;
+      while (delta < -Math.PI) delta += Math.PI * 2;
+      const instVel = delta / dt;
+      ar.spinAngle += delta;
+      ar.spinVel = ar.spinVel * 0.6 + instVel * 0.4;
+      ar.spinLastAngle = angle;
+      ar.spinLastTime = now;
+      if (ar.spinProxy) ar.spinProxy.rotation.z = ar.spinAngle;
+    };
+
+    const windowDragMove = (e: MouseEvent) => {
+      if (ar.isDraggingBullet) {
+        updateCarriedBullet(e.clientX, e.clientY);
+        placeHighlight();
+      } else if (ar.spinGestureActive) {
+        updateSpinGesture(e.clientX, e.clientY);
+      }
+    };
+
+    const finalizeLoadingDrag = (clientX: number, clientY: number) => {
+      if (ar.isDraggingBullet) {
+        ar.isDraggingBullet = false;
+        dropCarriedBullet(clientX, clientY);
+      }
+      if (ar.spinGestureActive) {
+        ar.spinGestureActive = false;
+        ar.spinLastTime = performance.now();
+      }
+      ar.dragLastPoint = null;
+      window.removeEventListener('mousemove', windowDragMove);
+      window.removeEventListener('mouseup', finalizeLoadingDragEvent);
+    };
+
+    const finalizeLoadingDragEvent = (e: MouseEvent) => {
+      finalizeLoadingDrag(e.clientX, e.clientY);
+    };
+
+    const handleMouseDown = (e: MouseEvent) => {
+      const latest = stateRef.current;
+      if (latest.gameState !== 'LOADING' || latest.showControls) return;
+      if (ar.isDraggingBullet || ar.spinGestureActive) return;
+
+      if (latest.loadingPhase === 'pickup') {
+        const t = getIntersectionTargetRaw(e.clientX, e.clientY);
+        let bulletGroup: THREE.Group | null = null;
+        let cur: THREE.Object3D | null = t;
+        while (cur && cur !== scene) {
+          if (cur.userData && cur.userData.isLoadBullet) {
+            bulletGroup = cur as THREE.Group;
+            break;
+          }
+          cur = cur.parent;
+        }
+        if (bulletGroup && bulletGroup.visible) {
+          ar.carriedBulletIdx = bulletGroup.userData.bulletIdx ?? 0;
+          ar.isDraggingBullet = true;
+          ar.highlightedSlot = -1;
+          vibrateGamepad('click');
+          window.addEventListener('mousemove', windowDragMove);
+          window.addEventListener('mouseup', finalizeLoadingDragEvent);
+        }
+      } else if (latest.loadingPhase === 'spin') {
+        const t = getIntersectionTargetRaw(e.clientX, e.clientY);
+        if (t && t.userData && t.userData.isSpinZone) {
+          ar.spinGestureActive = true;
+          ar.spinSettled = false;
+          const angle = getPointerAngleAroundAxis(e.clientX, e.clientY);
+          ar.spinLastAngle = angle;
+          ar.spinLastTime = performance.now();
+          vibrateGamepad('click');
+          window.addEventListener('mousemove', windowDragMove);
+          window.addEventListener('mouseup', finalizeLoadingDragEvent);
+        }
+      }
     };
 
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -2911,6 +3418,7 @@ export function Arena3D({
 
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mouseup', handleMouseUp);
+    window.addEventListener('mousedown', handleMouseDown);
     window.addEventListener('keydown', handleKeyDown);
 
 
@@ -2937,7 +3445,7 @@ export function Arena3D({
     let lastFrameTime = performance.now();
 
     const animate = () => {
-      if (webGpuErrorRef.current) {
+      if (webGpuErrorRef.current && (window as any).__rrForceRun !== true) {
         return; // Halt render engine immediately if WebGPU is unavailable
       }
       frameId = requestAnimationFrame(animate);
@@ -3183,7 +3691,7 @@ export function Arena3D({
                } else if (target.userData.isShootDealerButton && latest.showControls) {
                  fireGun('dealer', 'player');
                  setHoveredInfo(null);
-               } else if (target.userData.isShopItem) {
+} else if (target.userData.isShopItem && stateRef.current.showControls) {
                  const { type, cost } = target.userData;
                  if (latest.bloodCurrency >= cost && latest.player.items.length < 8) {
                     buyItem(type, cost);
@@ -3274,9 +3782,14 @@ export function Arena3D({
         stateRef.current.camPosVec = dealerCamPos.clone();
       }
       
-      const lerpSpeed = isLookingAtShopRef.current ? 0.14 : 0.20;
-      stateRef.current.lookTargetVec.lerp(activeLookTarget, damp(lerpSpeed));
-      stateRef.current.camPosVec.lerp(activeCamPos, damp(lerpSpeed));
+      // During LOADING the interactive bench close-up owns the camera
+      // (position + look target) — the default arena lerps would fight it
+      // and the view would shake / never reach the bench.
+      if (latest.gameState !== 'LOADING') {
+        const lerpSpeed = isLookingAtShopRef.current ? 0.14 : 0.20;
+        stateRef.current.lookTargetVec.lerp(activeLookTarget, damp(lerpSpeed));
+        stateRef.current.camPosVec.lerp(activeCamPos, damp(lerpSpeed));
+      }
 
       // Check if the gun barrel needs to show as cutoff/shortened (double damage)
       if (latest.doubleDamageActive) {
@@ -3770,23 +4283,35 @@ export function Arena3D({
       }
 
       // Cylindrical drum spinning of the weapon revolver itself!
-      if (revolverCylinderMesh) {
+      // (drum, flutes and rims all rotate together through the spin proxy)
+      if (ar.spinProxy) {
         if (latest.gameState === 'LOADING') {
-          revolverCylinderMesh.rotation.z += 0.35 * deltaScale;
+          if (latest.loadingPhase === 'spin') {
+            ar.spinProxy.rotation.z = ar.spinAngle;
+          } else {
+            ar.spinProxy.rotation.z = 0;
+          }
         } else if (ar.activeShootAnimationState === 'RAISING') {
-          revolverCylinderMesh.rotation.z += 0.05 * deltaScale;
+          ar.spinProxy.rotation.z += 0.05 * deltaScale;
         } else {
           const targetDrumAngle = (latest.currentChamberIndex / 6) * Math.PI * 2;
-          let drumDiff = targetDrumAngle - revolverCylinderMesh.rotation.z;
+          let drumDiff = targetDrumAngle - ar.spinProxy.rotation.z;
           while (drumDiff < -Math.PI) drumDiff += Math.PI * 2;
           while (drumDiff > Math.PI) drumDiff -= Math.PI * 2;
-          revolverCylinderMesh.rotation.z += drumDiff * damp(0.2);
+          ar.spinProxy.rotation.z += drumDiff * damp(0.2);
         }
       }
 
 
       // --- GUN ANIMATION SYSTEM ---
-      if (latest.gameState === 'SHOOTING') {
+      if (latest.gameState === 'LOADING') {
+        // The interactive loading block below fully owns the revolver's bench
+        // pose; the idle/shoot animation must not fight it every frame.
+        ar.activeShootAnimationState = 'IDLE';
+        ar.activeShootStartTime = 0;
+        ar.hasDischarged = false;
+        hammerMesh.rotation.x = -0.15;
+      } else if (latest.gameState === 'SHOOTING') {
           if (ar.activeShootAnimationState === 'IDLE') {
           ar.activeShootAnimationState = 'RAISING';
           ar.activeShootStartTime = Date.now();
@@ -4092,12 +4617,30 @@ export function Arena3D({
             }
           });
         }
+
+        // Red glow outline flags the selected piece, tracing its curves
+        const pOutlines: THREE.LineSegments[] | undefined = mesh.userData?.outlines;
+        if (pOutlines) {
+          const showOutline = isSelected && latest.showControls;
+          pOutlines.forEach((o) => { o.visible = showOutline; });
+          if (showOutline) outlineMatRed.opacity = 0.55 + Math.sin(time * 7.0) * 0.3;
+        }
       });
 
       // Dealer slow item floating sways
       dealerItemMeshes.forEach((mesh, idx) => {
         mesh.position.y = Math.sin(time * 1.5 + idx * 0.6) * 0.02;
         mesh.rotation.y = Math.sin(time * 0.5 + idx * 0.3) * 0.05;
+      });
+
+      // Shop shelf items: red glow outline highlights the hovered buyable piece
+      shopItemMeshes.forEach((mesh) => {
+        const sOutlines: THREE.LineSegments[] | undefined = mesh.userData?.outlines;
+        if (sOutlines) {
+          const showOutline = isLookingAtShopRef.current && hoveredMesh === mesh;
+          sOutlines.forEach((o) => { o.visible = showOutline; });
+          if (showOutline) outlineMatRed.opacity = 0.55 + Math.sin(time * 7.0) * 0.3;
+        }
       });
 
 
@@ -5572,59 +6115,136 @@ export function Arena3D({
         const parallaxX = ar.smoothMouseX * 0.38;
         const parallaxY = ar.smoothMouseY * 0.24;
 
-        camera.position.copy(stateRef.current.camPosVec);
-        camera.position.x += handSwayX + shakeX + parallaxX;
-        camera.position.y += handSwayY + shakeY + parallaxY;
-        camera.position.z += shakeZ + ar.cameraKickZ;
+// During LOADING the bench close-up below steers the camera directly.
+        if (latest.gameState !== 'LOADING') {
+          camera.position.copy(stateRef.current.camPosVec);
+          camera.position.x += handSwayX + shakeX + parallaxX;
+          camera.position.y += handSwayY + shakeY + parallaxY;
+          camera.position.z += shakeZ + ar.cameraKickZ;
 
-        if (stateRef.current.lookTargetVec) {
-          stateRef.current.lookTargetVec.x += ar.smoothMouseX * 0.65 * damp(0.12);
-          stateRef.current.lookTargetVec.y += ar.smoothMouseY * 0.45 * damp(0.12);
+          if (stateRef.current.lookTargetVec) {
+            stateRef.current.lookTargetVec.x += ar.smoothMouseX * 0.65 * damp(0.12);
+            stateRef.current.lookTargetVec.y += ar.smoothMouseY * 0.45 * damp(0.12);
+          }
         }
       }
 
-      // --- LOADING ANIMATION: CYLINDER RELOAD ---
+      // --- INTERACTIVE MANUAL LOADING: BENCH POSE, COUP DE GRÂCE DRAG & SPIN ---
       if (latest.gameState === 'LOADING') {
-        if (ar.loadingAnimStartTime === 0) {
-            ar.loadingAnimStartTime = Date.now();
-            ar.bulletLoadedFlags = [false, false, false, false, false, false];
+        // Lazily compute the propped-up "bench" pose from the resting pose so
+        // the cylinder axis stands vertical (chamber mouths facing up).
+        if (!ar.propQuat) {
+          const baseQ = new THREE.Quaternion().setFromEuler(initialGunRot);
+          const benchA = new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI / 2, Math.PI / 2, 0));
+          ar.propQuat = new THREE.Quaternion().multiplyQuaternions(benchA, baseQ);
+          // Anchor by the cylinder CENTER so the drum stands clear of the
+          // tabletop with the chamber mouths facing up (no table clipping).
+          const cylBase = new THREE.Vector3(0, 0.12, -0.05).applyQuaternion(baseQ).applyQuaternion(benchA);
+          ar.propPos = new THREE.Vector3(0, 0.97, -0.32).sub(cylBase);
         }
-        const rawLoad = (Date.now() - ar.loadingAnimStartTime) / 1000;
-        const loadElapsed = rawLoad * 1.3;
-        
-        // Raising the gun to center view
-        if (loadElapsed < 0.5) {
-            const t = loadElapsed / 0.5;
-            gunGroup.position.y = initialGunPos.y + t * 0.6;
-            gunGroup.rotation.x = initialGunRot.x - t * 0.7;
-        } else if (loadElapsed < 2.5) {
-            // Loading bullets sequence
-            const bulletTime = (loadElapsed - 0.5) / 1.7; // load sequence duration
-            const bulletIdx = Math.floor(bulletTime * 6);
-            
-            if (bulletIdx >= 0 && bulletIdx < 6 && !ar.bulletLoadedFlags[bulletIdx]) {
-                ar.bulletLoadedFlags[bulletIdx] = true;
-                playBulletLoad();
-                spawnParticles(gunGroup.position, 0xffcc00, 5, 0.05, 0.001, 'SPARK');
-                // Sharp, quick visceral jolt when the bullet slides into the cylinder
-                vibrateGamepad('jolt', { duration: 45, weak: 0.1, strong: 1.0 });
+        gunGroup.position.lerp(ar.propPos, damp(0.09));
+        gunGroup.quaternion.slerp(ar.propQuat, damp(0.09));
+
+        // Build the ammo block + rounds the first frame a loading begins.
+        if (!ar.loadingSceneBuilt) {
+          if ((window as any).__rrForceRun === true) console.log('[LOAD-BUILD] count=', latest.bulletTargetCount, 'ammoBlock id=', (ammoBlock as any).id);
+          (window as any).__rrDbgAmmoId = (ammoBlock as any).id;
+          ar.loadingSceneBuilt = true;
+          ar.filledSlots = [false, false, false, false, false, false];
+          ar.spinAngle = 0;
+          ar.spinVel = 0;
+          ar.spinSettled = false;
+          ar.spinRatchetSector = 0;
+          ar.carriedBulletIdx = -1;
+          ar.isDraggingBullet = false;
+          ar.highlightedSlot = -1;
+          ar.insertAnims = [];
+          ar.returnAnims = [];
+          if (ar.spinProxy) ar.spinProxy.rotation.z = 0;
+          ammoBlock.updateMatrixWorld(true);
+          ammoBlock.visible = true;
+          const count = latest.bulletTargetCount;
+          ar.loadBullets.forEach((b, i) => {
+            b.visible = i < count;
+            if (b.visible) {
+              b.position.copy(blockSlotLocal(i));
+              b.rotation.y = Math.random() * Math.PI * 2;
+              b.rotation.z = 0;
             }
-            
-            // Jitter/Recoil on each bullet load
-            const jitter = Math.sin(bulletTime * Math.PI * 12) * 0.02;
-            gunGroup.position.y = initialGunPos.y + 0.6 + jitter;
-            
-            // Spinning cylinder during load
-            revolverCylinderMesh.rotation.z += 0.15 * deltaScale;
-            drumMesh.rotation.y += 0.15 * deltaScale;
-        } else if (loadElapsed < 3.0) {
-            // Lowering back down
-            const lowerT = (loadElapsed - 2.5) / 0.5;
-            gunGroup.position.y = initialGunPos.y + 0.6 - (lowerT * 0.6);
-            gunGroup.rotation.x = (initialGunRot.x - 0.7) + (lowerT * 0.7);
+          });
+          if (ar.slotHighlight) ar.slotHighlight.visible = false;
         }
+
+        // Cursor-tracking highlight of the chamber being aimed at
+        placeHighlight();
+
+        // Bullet insert / snap-back tweens
+        if (ar.insertAnims.length) {
+          ar.insertAnims = ar.insertAnims.filter((a) => {
+            a.t += rawDt / 0.32;
+            if (a.t >= 1) {
+              a.bullet.visible = false;
+              return false;
+            }
+            const t = a.t < 0.6 ? (a.t / 0.6) : 1; // slide in, then rest in the hole
+            a.bullet.position.lerpVectors(a.from, a.to, t);
+            a.bullet.rotation.z = 0;
+            return true;
+          });
+        }
+        if (ar.returnAnims.length) {
+          ar.returnAnims = ar.returnAnims.filter((a) => {
+            a.t += rawDt / 0.25;
+            if (a.t >= 1) return false;
+            a.bullet.position.lerpVectors(a.from, a.to, a.t);
+            return true;
+          });
+        }
+
+        // Manual cylinder spin physics (phase 'spin')
+        if (latest.loadingPhase === 'spin' && !ar.spinSettled) {
+          if (Math.abs(ar.spinVel) > 0.02) {
+            ar.spinVel *= Math.exp(-2.0 * rawDt);
+            ar.spinAngle += ar.spinVel * rawDt;
+            // Steel ratchet clicks as chambers pass the barrel
+            const sector = Math.floor(((ar.spinAngle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2) / (Math.PI / 3));
+            if (sector !== ar.spinRatchetSector) {
+              ar.spinRatchetSector = sector;
+              playEmptyClick();
+              vibrateGamepad('click');
+            }
+          } else {
+            // Settled: snap to the nearest chamber and hand the index to the engine.
+            ar.spinSettled = true;
+            ar.spinVel = 0;
+            const sector = ((ar.spinAngle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+            let idx = Math.round(sector / (Math.PI / 3)) % 6;
+            ar.spinAngle = idx * (Math.PI / 3);
+            playEmptyClick();
+            onSpinComplete(idx);
+          }
+        }
+
+        // Surveying bench shot: pulled back so the whole revolver + ammo block sit
+        // comfortably in frame — no harsh zoom, no table clipping.
+        const loadCam = new THREE.Vector3(0.1, 1.7, 2.3);
+        camera.position.lerp(loadCam, damp(0.07));
+        stateRef.current.camPosVec.lerp(loadCam, damp(0.07));
+        stateRef.current.lookTargetVec.copy(new THREE.Vector3(0, 0.92, -0.28));
       } else {
-        ar.loadingAnimStartTime = 0;
+        // Leaving loading: hide the bench props; the idle/shooting animation
+        // code eases the revolver back onto the table.
+        if (ar.loadingSceneBuilt) {
+          if ((window as any).__rrForceRun === true) console.log('[LOAD-EXIT] gameState=', latest.gameState, 'ammoBlock id=', (ammoBlock as any).id);
+          ar.loadingSceneBuilt = false;
+          ammoBlock.visible = false;
+          ar.loadBullets.forEach((b) => { b.visible = false; });
+          if (ar.slotHighlight) ar.slotHighlight.visible = false;
+        }
+        ar.spinGestureActive = false;
+        ar.isDraggingBullet = false;
+        ar.spinVel = 0;
+        stateRef.current.lookTargetVec = null;
       }
 
       // --- DYNAMIC TV HEALTH MONITORS AND INDENT GLOW UPDATES ---
@@ -5694,6 +6314,7 @@ export function Arena3D({
       resizeObserver.disconnect();
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
+      window.removeEventListener('mousedown', handleMouseDown);
       window.removeEventListener('keydown', handleKeyDown);
       document.body.style.cursor = '';
       if (renderPipeline && typeof renderPipeline.dispose === 'function') {

@@ -17,13 +17,54 @@ function cleanAndParseJson(text: string) {
   return JSON.parse(cleaned);
 }
 
+// Adaptive reasoning: scale Gemini thinking tokens to the tactical complexity of the situation.
+// Obvious turns (all-live / all-blank) need barely any reasoning; lethal composite setups do.
+function computeThinkingLevel(body: any): ThinkingLevel {
+  const {
+    dealer,
+    player,
+    liveCount = 0,
+    blankCount = 0,
+    retaliationActive = false,
+    doubleDamageActive = null,
+    bluffActive = false,
+  } = body;
+
+  const dealerHP = dealer?.health ?? 100;
+  const playerHP = player?.health ?? 100;
+  const dealerItems: string[] = dealer?.items || [];
+
+  let score = 0;
+
+  // Chamber ambiguity: a genuine 50/50 demands weighing options; all-live/all-blank is trivial.
+  if (liveCount > 0 && blankCount > 0) score += 1;
+
+  // Items that change the calculus (mirror/pliers/scalpel/razor/pentagram), cap the bonus.
+  const tacticalItems = ['MIRROR', 'PLIERS', 'SCALPEL', 'RAZORBLADE', 'PENTAGRAM'];
+  score += Math.min(2, dealerItems.filter((i: string) => tacticalItems.includes(i)).length);
+
+  // Lethal windows.
+  if (playerHP <= 70) score += 1; // live headshot (35) or doubled (70) can finish the player.
+  if (dealerHP <= 70) score += 1; // any self-shot gamble is life-threatening.
+  if (doubleDamageActive) score += 1; // capitalized combo in play.
+  if (retaliationActive) score += 1; // revenge overriding math.
+
+  // A rattled dealer is told to play proud and impulsive - shallow reasoning is on-theme.
+  if (bluffActive) score = Math.max(0, score - 1);
+
+  if (score >= 4) return ThinkingLevel.MEDIUM;
+  if (score >= 1) return ThinkingLevel.LOW;
+  return ThinkingLevel.MINIMAL;
+}
+
 // Unified multi-provider AI runner
 async function queryAiProvider(
   provider: string,
   apiKey: string,
   modelName: string,
   systemInstruction: string,
-  prompt: string
+  prompt: string,
+  thinkingLevel: ThinkingLevel = ThinkingLevel.LOW
 ) {
   const p = (provider || "gemini").toLowerCase();
 
@@ -40,17 +81,16 @@ async function queryAiProvider(
       contents: prompt,
       config: {
         systemInstruction,
-        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        thinkingConfig: { thinkingLevel },
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.OBJECT,
           properties: {
             action: { type: Type.STRING },
             itemIndex: { type: Type.INTEGER },
-            target: { type: Type.STRING },
-            reasoning: { type: Type.STRING }
+            target: { type: Type.STRING }
           },
-          required: ["action", "itemIndex", "target", "reasoning"]
+          required: ["action", "itemIndex", "target"]
         }
       }
     });
@@ -72,7 +112,7 @@ async function queryAiProvider(
         response_format: { type: "json_object" },
         temperature: 0.2,
         messages: [
-          { role: "system", content: systemInstruction + " Output strictly valid JSON with keys: action ('USE_ITEM'|'SHOOT'), itemIndex (integer, -1 if SHOOT), target ('player'|'dealer'), reasoning (string)." },
+          { role: "system", content: systemInstruction + " Output strictly valid JSON with keys: action ('USE_ITEM'|'SHOOT'), itemIndex (integer, -1 if SHOOT), target ('player'|'dealer')." },
           { role: "user", content: prompt }
         ]
       })
@@ -100,7 +140,7 @@ async function queryAiProvider(
         response_format: { type: "json_object" },
         temperature: 0.2,
         messages: [
-          { role: "system", content: systemInstruction + " Output strictly valid JSON with keys: action ('USE_ITEM'|'SHOOT'), itemIndex (integer, -1 if SHOOT), target ('player'|'dealer'), reasoning (string)." },
+          { role: "system", content: systemInstruction + " Output strictly valid JSON with keys: action ('USE_ITEM'|'SHOOT'), itemIndex (integer, -1 if SHOOT), target ('player'|'dealer')." },
           { role: "user", content: prompt }
         ]
       })
@@ -128,7 +168,7 @@ async function queryAiProvider(
         response_format: { type: "json_object" },
         temperature: 0.2,
         messages: [
-          { role: "system", content: systemInstruction + " Output strictly valid JSON with keys: action ('USE_ITEM'|'SHOOT'), itemIndex (integer, -1 if SHOOT), target ('player'|'dealer'), reasoning (string)." },
+          { role: "system", content: systemInstruction + " Output strictly valid JSON with keys: action ('USE_ITEM'|'SHOOT'), itemIndex (integer, -1 if SHOOT), target ('player'|'dealer')." },
           { role: "user", content: prompt }
         ]
       })
@@ -155,7 +195,7 @@ async function queryAiProvider(
       body: JSON.stringify({
         model,
         max_tokens: 300,
-        system: systemInstruction + " You MUST output strictly valid JSON only containing keys: action ('USE_ITEM'|'SHOOT'), itemIndex (integer, -1 if SHOOT), target ('player'|'dealer'), reasoning (string). Do not include markdown codeblocks or text outside JSON.",
+        system: systemInstruction + " You MUST output strictly valid JSON only containing keys: action ('USE_ITEM'|'SHOOT'), itemIndex (integer, -1 if SHOOT), target ('player'|'dealer'). Do not include markdown codeblocks or text outside JSON.",
         temperature: 0.2,
         messages: [
           { role: "user", content: prompt }
@@ -178,7 +218,7 @@ app.post("/api/test-ai-key", async (req, res) => {
   try {
     const { provider = "gemini", apiKey = "", model = "" } = req.body;
     const testSys = "You are an AI API connection tester.";
-    const testPrompt = "Respond with JSON object {\"action\":\"SHOOT\",\"itemIndex\":-1,\"target\":\"player\",\"reasoning\":\"Test verified\"}";
+    const testPrompt = "Respond with JSON object {\"action\":\"SHOOT\",\"itemIndex\":-1,\"target\":\"player\"}";
     const result = await queryAiProvider(provider, apiKey, model, testSys, testPrompt);
     return res.json({ success: true, provider, result });
   } catch (err: any) {
@@ -201,7 +241,8 @@ app.post("/api/ai-dealer", async (req, res) => {
       doubleDamageActive = null,
       dealerDamageReductionEnd = null,
       playerDamageReductionEnd = null,
-      itemsUsedThisTurn = 0
+      itemsUsedThisTurn = 0,
+      bluffActive = false
     } = req.body;
 
     const totalCount = liveCount + blankCount;
@@ -238,18 +279,19 @@ Context:
 - Double Damage Active: ${doubleDamageActive ? doubleDamageActive : 'NONE'}
 - Dealer Damage Reduction Active: ${dealerDamageReductionEnd ? 'YES' : 'NO'}
 - Player Damage Reduction Active: ${playerDamageReductionEnd ? 'YES' : 'NO'}
+- PSYCHOLOGICAL PRESSURE: ${bluffActive ? 'ACTIVE — the player has been taunting and rattling you. You feel unnerved and humiliated: you are prone to misreading chamber odds by up to 25%, you are ~20% more likely to take reckless chances, and you feel a hot urge to swing the barrel at yourself in front of blanks to prove your nerve. Do NOT play optimally while rattled — play proud, careless and impulsive. A few small mistakes are welcome.' : 'NONE'}
 
-Item Reference & Tactical Usage:
-- MIRROR: Secretly inspects current chamber. Best used before deciding whether to shoot player, shoot self, or apply SCALPEL.
-- PLIERS: Ejects current round (-5 HP self-bleed). Use to rack past unwanted BLANK rounds or discard a LIVE round.
-- WHISKEY: Restores +20 HP. Use only when wounded (< 80 HP) to stay out of lethal range.
-- TOURNIQUET: Boosts max HP capacity by +1 HP.
-- PENTAGRAM: SWAPS current HP between Dealer & Player! Best when Dealer is very low HP and Player is high HP.
-- CANNABIS: Grants 20s damage reduction shield.
-- SCALPEL: Activates DOUBLE DAMAGE (70 HP) for the next shot. Crucial combo item right before shooting player when live round is confirmed/probable.
-- DEFIBRILLATOR: Restores +40 HP, but -10 max HP permanently. Use when critically low (< 40 HP).
-- SYRINGE: Restores +50 HP instantly. Use when heavily wounded (< 50 HP).
-- RAZORBLADE: Slashes flesh (-10 HP self-bleed): converts BLANK to LIVE, or grants DOUBLE DAMAGE if already LIVE.
+Item reference & comprehensive strategy guide:
+- MIRROR: Secretly inspects the current chamber without firing. Reveals whether the round currently in the barrel is LIVE or BLANK. Best used before deciding whether to shoot the player (if LIVE), shoot yourself to gain another turn (if BLANK), or apply SCALPEL.
+- PLIERS: Ejects the current round from the cylinder without firing (costs 5 HP self-bleed). Use to rack past unwanted BLANK rounds or safely discard a LIVE round.
+- WHISKEY: Restores +20 HP (up to max health). Use when damaged to stay out of lethal range.
+- TOURNIQUET: Boosts maximum HP capacity by +1 HP. Good early-turn utility item.
+- PENTAGRAM: SWAPS current HP values between Dealer and Player! Devastating when Dealer is low HP (e.g. 10-30 HP) and Player is high HP (e.g. 70-100 HP) — steals their health and gives them your low HP!
+- CIGARETTE: Calms nicotine cravings & steadies nerves. Grants a 20-second damage reduction shield (blocks 30 HP of incoming shot damage). Light one up before a risky shot.
+- SCALPEL: Activates DOUBLE DAMAGE for the next gun shot (70 HP damage instead of 35 HP!). Crucial combo item right before shooting the player when a live round is confirmed or highly probable.
+- DEFIBRILLATOR: Delivers an emergency jolt restoring +40 HP, at the cost of permanently reducing Max HP by 10. Best when HP is critically low (< 40 HP).
+- SYRINGE: High-potency medical injection restoring +50 HP instantly (up to max health).
+- RAZORBLADE: Slashes flesh (-10 HP self-damage) for blood magic: if current chamber is BLANK, converts it into a LIVE round; if already LIVE, grants DOUBLE DAMAGE! Excellent for turning a safe blank into a deadly live attack against the player.
 
 CRITICAL ITEM SPARING & CONSERVATION DIRECTIVES:
 - ITEMS ARE FINITE AND NON-RENEWABLE. DO NOT SPAM OR DRAIN YOUR INVENTORY IN A SINGLE TURN OR ROUND!
@@ -264,7 +306,7 @@ Decision Rules:
 3. Return valid JSON following the required schema.
 `;
 
-    const parsed = await queryAiProvider(provider, apiKey, customModel, difficultyPersona, prompt);
+    const parsed = await queryAiProvider(provider, apiKey, customModel, difficultyPersona, prompt, computeThinkingLevel(req.body));
     return res.json(parsed);
 
   } catch (error: any) {

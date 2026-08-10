@@ -80,6 +80,15 @@ export default function App() {
     startGame,
     fireGun,
     useItem,
+    loadingPhase,
+    bulletsInserted,
+    bulletTargetCount,
+    bluffCharges,
+    bluffActiveTurns,
+    bluff,
+    registerBulletInserted,
+    completeLoading,
+    autoLoad,
   } = useGameState();
 
   const [showDeathScreen, setShowDeathScreen] = useState(false);
@@ -108,6 +117,7 @@ export default function App() {
   const isPlayerTurn = gameState === "PLAYER_TURN";
   const showControls = isPlayerTurn;
   const isActionInProgress = gameState === "SHOOTING" || gameState === "ITEM_USE" || gameState === "LOADING" || gameState === "DEALER_TURN";
+  const isDealerRattled = bluffActiveTurns > 0;
 
   useEffect(() => {
     if (selectedItemIndex >= player.items.length) {
@@ -176,6 +186,20 @@ export default function App() {
         if (player.health <= 0 && gameState !== "MENU") return;
         if (isActionInProgress) return;
         setIsSettingsOpen((p) => !p);
+        return;
+      }
+
+      // BLUFF: psych-out the Dealer during your turn.
+      if (isPlayerTurn && (e.key === "f" || e.key === "F") && bluffCharges > 0) {
+        e.preventDefault();
+        bluff();
+        return;
+      }
+
+      // During interactive loading: Space / Enter / L = QUICK LOAD.
+      if (gameState === "LOADING" && (e.key === " " || e.code === "Space" || e.key === "Enter" || e.key === "l" || e.key === "L")) {
+        e.preventDefault();
+        autoLoad();
         return;
       }
 
@@ -250,6 +274,8 @@ export default function App() {
                   ".btn-rusty",
                 ) as HTMLButtonElement;
                 if (returnBtn) returnBtn.click();
+              } else if (gameState === "LOADING") {
+                autoLoad();
               } else if (
                 gameState === "MENU" ||
                 gameState === "ROUND_OVER" ||
@@ -448,6 +474,13 @@ export default function App() {
               buyItem={buyItem}
               playerDamageReductionEnd={playerDamageReductionEnd}
               dealerDamageReductionEnd={dealerDamageReductionEnd}
+              loadingPhase={loadingPhase}
+              bulletsInserted={bulletsInserted}
+              bulletTargetCount={bulletTargetCount}
+              bluffActiveTurns={bluffActiveTurns}
+              onBulletInserted={registerBulletInserted}
+              onSpinComplete={completeLoading}
+              onAutoLoad={autoLoad}
             />
           </div>
 
@@ -515,6 +548,30 @@ export default function App() {
             {/* Top Row: Dealer Hand info */}
             <div className="flex justify-between items-start w-full mt-4 sm:mt-0">
               <div className="flex items-center gap-3 pointer-events-auto">
+                {isPlayerTurn && (
+                  <>
+                    <button
+                      onClick={() => bluff()}
+                      disabled={bluffCharges <= 0}
+                      className={`pointer-events-auto min-h-[38px] px-4 py-2 rounded-none border font-mono text-[11px] font-bold uppercase tracking-widest transition-all cursor-pointer flex items-center gap-2 ${
+                        bluffCharges > 0
+                          ? isDealerRattled
+                            ? "bg-fuchsia-950/80 border-fuchsia-600 text-fuchsia-200 shadow-[0_0_18px_rgba(217,70,239,0.35)]"
+                            : "bg-red-950/80 border-red-700 text-red-200 hover:bg-red-900/90 hover:border-red-500"
+                          : "bg-neutral-900/70 border-neutral-800 text-neutral-600 cursor-not-allowed"
+                      }`}
+                    >
+                      <span className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />
+                      <span>BLUFF ({bluffCharges})</span>
+                      <span className="text-[9px] text-neutral-500 font-normal hidden sm:inline">[F]</span>
+                    </button>
+                    {isDealerRattled && (
+                      <span className="px-3 py-1.5 rounded-none border border-fuchsia-800/70 bg-fuchsia-950/60 text-fuchsia-300 font-mono text-[10px] font-bold uppercase tracking-widest animate-pulse">
+                        DEALER RATTLED ({bluffActiveTurns})
+                      </span>
+                    )}
+                  </>
+                )}
               </div>
               <div className="text-[10px] font-mono text-neutral-300 frosted-glass-ui backdrop-blur-md px-3 py-1.5 select-none font-bold">
                 DEALER HAND: {dealer.items.length}/8
@@ -535,7 +592,43 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Dialogue Box: Pure floating text centered at the absolute bottom, no container box, borderless and unobstructed */}
+              {/* Interactive Loading Instructions + Quick Load */}
+      {gameState === "LOADING" && (
+        <div className="fixed inset-x-0 bottom-24 sm:bottom-28 z-20 flex flex-col items-center gap-2.5 pointer-events-none">
+          <div className="frosted-glass-ui px-5 py-3 border border-red-950/70 text-center max-w-xl animate-fade-in">
+            {loadingPhase === "pickup" ? (
+              <>
+                <div className="font-mono text-xs sm:text-sm font-bold uppercase tracking-[0.2em] text-red-300">
+                  LOAD THE CYLINDER — ROUND BY ROUND
+                </div>
+                <div className="mt-1 font-mono text-[10px] sm:text-[11px] text-neutral-300 tracking-wide">
+                  CLICK A ROUND ON THE WOODEN BLOCK AND DRAG IT INTO AN OPEN CHAMBER
+                  <span className="mx-2 text-red-500/80">•</span>
+                  <span className="text-amber-300 font-bold">{bulletsInserted}/{bulletTargetCount} SEATED</span>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="font-mono text-xs sm:text-sm font-bold uppercase tracking-[0.2em] text-red-300">
+                  SPIN THE CYLINDER
+                </div>
+                <div className="mt-1 font-mono text-[10px] sm:text-[11px] text-neutral-300 tracking-wide">
+                  CLICK ON THE CYLINDER AND DRAG ACROSS IT. LET IT RATCHET TO A STOP.
+                </div>
+              </>
+            )}
+          </div>
+          <button
+            onClick={() => autoLoad()}
+            className="pointer-events-auto min-h-[36px] px-4 py-1.5 rounded-none border border-neutral-700 bg-neutral-900/80 hover:border-red-600 hover:text-red-300 text-neutral-400 font-mono text-[10px] font-bold uppercase tracking-widest transition-all cursor-pointer"
+            title="Skip manual loading"
+          >
+            QUICK LOAD [SPACE]
+          </button>
+        </div>
+      )}
+
+      {/* Dialogue Box: Pure floating text centered at the absolute bottom, no container box, borderless and unobstructed */}
               {((gameState !== "SHOOTING" &&
                 !(gameState === "GAME_OVER" && player.health <= 0)) ||
                 message === "BANG!" ||

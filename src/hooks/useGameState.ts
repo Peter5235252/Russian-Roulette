@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { GameState, Chamber, PlayerState, ItemType, Difficulty } from '../types';
-import { DEADLY_QUOTES } from '../gameData';
-import { playStartAudio, startAmbientDrone, playGunshot, playEmptyClick, playItemSound, playBloodSplatter } from '../audio';
+import { DEADLY_QUOTES, BLUFF_QUOTES, BLUFF_QUOTES_FAILED } from '../gameData';
+import { playStartAudio, startAmbientDrone, playGunshot, playEmptyClick, playItemSound, playBloodSplatter, playBulletLoad, playTapSound } from '../audio';
 import { vibrateGamepad, getControllerSettings } from '../controller';
 
 const INITIAL_HEALTH = 100;
@@ -51,6 +51,11 @@ interface CoreState {
   bloodCurrency: number;
   doubleDamageActive: 'player' | 'dealer' | null;
   roundsSurvived: number;
+  loadingPhase: 'pickup' | 'spin';
+  bulletsInserted: number;
+  bulletTargetCount: number;
+  bluffCharges: number;
+  bluffActiveTurns: number;
 }
 
 export const useGameState = () => {
@@ -70,7 +75,12 @@ export const useGameState = () => {
     dealerDamageReductionEnd: null,
     bloodCurrency: 0,
     doubleDamageActive: null,
-    roundsSurvived: 0
+    roundsSurvived: 0,
+    loadingPhase: 'pickup',
+    bulletsInserted: 0,
+    bulletTargetCount: 1,
+    bluffCharges: 1,
+    bluffActiveTurns: 0
   });
 
   const stateRef = useRef<CoreState>(state);
@@ -97,8 +107,12 @@ export const useGameState = () => {
       chambers: newChambers,
       currentChamberIndex: 0,
       retaliationActive: false,
-      message: "Loading the cylinder...",
-      subMessage: `${live} LIVE. ${CYLINDER_SIZE - live} BLANK.`
+      loadingPhase: 'pickup',
+      bulletsInserted: 0,
+      bulletTargetCount: live,
+      bluffCharges: 1,
+      message: "The rounds wait on the table. Take them one by one.",
+      subMessage: `${live} LIVE. ${CYLINDER_SIZE - live} BLANK. Drag the rounds into the cylinder.`
     });
     
     if (!initialLoading) {
@@ -111,11 +125,82 @@ export const useGameState = () => {
        });
     }
 
-    await wait(1500);
+    // NOTE: The game intentionally STAYS in LOADING until the player has
+    // physically loaded each round and spun the cylinder (or used QUICK LOAD).
+    // The 3D arena drives this flow via registerBulletInserted + completeLoading.
+  };
+
+  const registerBulletInserted = () => {
+    const s = stateRef.current;
+    if (s.gameState !== 'LOADING' || s.loadingPhase !== 'pickup') return;
+    playBulletLoad();
+    const next = s.bulletsInserted + 1;
+    if (next >= s.bulletTargetCount) {
+      updateState({
+        bulletsInserted: next,
+        loadingPhase: 'spin',
+        message: "The cylinder is full. Spin it — fate decides.",
+        subMessage: "Click and drag across the cylinder to spin it."
+      });
+      vibrateGamepad('jolt', { duration: 60, weak: 0.15, strong: 0.9 });
+    } else {
+      updateState({
+        bulletsInserted: next,
+        subMessage: `${next}/${s.bulletTargetCount} rounds seated. ${s.bulletTargetCount - next} left on the block.`
+      });
+    }
+  };
+
+  const completeLoading = (finalIndex: number) => {
+    const s = stateRef.current;
+    if (s.gameState !== 'LOADING') return;
+    const clamped = Math.max(0, Math.min(CYLINDER_SIZE - 1, Math.round(finalIndex) || 0));
     updateState({
+      currentChamberIndex: clamped,
+      loadingPhase: 'spin',
+      bulletsInserted: s.bulletTargetCount,
       message: DEADLY_QUOTES[Math.floor(Math.random() * DEADLY_QUOTES.length)],
       subMessage: "Your turn.",
       gameState: 'PLAYER_TURN'
+    });
+  };
+
+  const autoLoad = () => {
+    const s = stateRef.current;
+    if (s.gameState !== 'LOADING') return;
+    playBulletLoad();
+    const idx = Math.floor(Math.random() * CYLINDER_SIZE);
+    updateState({
+      currentChamberIndex: idx,
+      loadingPhase: 'spin',
+      bulletsInserted: s.bulletTargetCount,
+      message: DEADLY_QUOTES[Math.floor(Math.random() * DEADLY_QUOTES.length)],
+      subMessage: "Your turn.",
+      gameState: 'PLAYER_TURN'
+    });
+  };
+
+  const bluff = () => {
+    const s = stateRef.current;
+    if (s.gameState !== 'PLAYER_TURN' || s.bluffCharges <= 0) return;
+
+    // Landing chances per difficulty: rattling a cold killer is hard.
+    const landChance: Record<Difficulty, number> = {
+      NORMAL: 0.8,
+      HARD: 0.6,
+      VERY_HARD: 0.4,
+      NIGHTMARE: 0.22,
+    };
+    const landed = Math.random() < (landChance[s.difficulty] ?? 0.6);
+
+    playTapSound();
+    updateState({
+      bluffCharges: s.bluffCharges - 1,
+      bluffActiveTurns: landed ? 2 : 0,
+      message: "BLUFF.",
+      subMessage: landed
+        ? BLUFF_QUOTES[Math.floor(Math.random() * BLUFF_QUOTES.length)] + " His composure cracks — he misreads the odds for two turns."
+        : BLUFF_QUOTES_FAILED[Math.floor(Math.random() * BLUFF_QUOTES_FAILED.length)]
     });
   };
 
@@ -476,6 +561,8 @@ export const useGameState = () => {
         // Display thinking subtitle in HUD
         updateState({ message: "The Dealer is thinking on what to do..." });
 
+        const rattled = currentRef.bluffActiveTurns > 0;
+
         // --- MULTI-PROVIDER AI DEALER INTEGRATION ---
         try {
           const controller = new AbortController();
@@ -498,7 +585,8 @@ export const useGameState = () => {
               doubleDamageActive: currentRef.doubleDamageActive,
               dealerDamageReductionEnd: currentRef.dealerDamageReductionEnd,
               playerDamageReductionEnd: currentRef.playerDamageReductionEnd,
-              itemsUsedThisTurn: dealerItemsUsedThisTurnRef.current
+              itemsUsedThisTurn: dealerItemsUsedThisTurnRef.current,
+              bluffActive: rattled
             }),
             signal: controller.signal
           });
@@ -510,11 +598,13 @@ export const useGameState = () => {
               if (decision.action === 'USE_ITEM' && typeof decision.itemIndex === 'number' && decision.itemIndex >= 0 && decision.itemIndex < myItems.length) {
                 console.log(`[AI Dealer (${aiSettings.aiProvider || 'gemini'})]`, decision.reasoning);
                 aiRef.current = false;
+                if (rattled) updateState({ bluffActiveTurns: Math.max(0, currentRef.bluffActiveTurns - 1) });
                 useItem(decision.itemIndex, 'dealer');
                 return;
               } else if (decision.action === 'SHOOT' && (decision.target === 'player' || decision.target === 'dealer')) {
                 console.log(`[AI Dealer (${aiSettings.aiProvider || 'gemini'})]`, decision.reasoning);
                 aiRef.current = false;
+                if (rattled) updateState({ bluffActiveTurns: Math.max(0, currentRef.bluffActiveTurns - 1) });
                 fireGun(decision.target, 'dealer');
                 return;
               }
@@ -527,6 +617,12 @@ export const useGameState = () => {
         // --- FALLBACK HEURISTIC DEALER LOGIC ---
         const totalCount = lCount + bCount;
         let liveChance = totalCount > 0 ? lCount / totalCount : 0.5;
+
+        // Psychology: a rattled dealer misjudges the odds. He reads ±25% noise
+        // into the true live probability and gets reckless under pressure.
+        if (rattled) {
+          liveChance = Math.max(0, Math.min(1, liveChance + (Math.random() - 0.5) * 0.5));
+        }
 
         // On NORMAL difficulty, tone down aggressive shooting odds to make fallback fair
         if ((currentRef.difficulty || 'NORMAL') === 'NORMAL') {
@@ -595,6 +691,12 @@ export const useGameState = () => {
           }
         }
 
+        // A rattled dealer fumbles: 30% chance he ignores the item he should have
+        // used and acts on raw nerve instead.
+        if (selectedItemIndex !== -1 && rattled && Math.random() < 0.3) {
+           selectedItemIndex = -1;
+        }
+
         if (selectedItemIndex !== -1) {
              aiRef.current = false;
              useItem(selectedItemIndex, 'dealer'); // sets state to ITEM_USE, breaking this cycle
@@ -623,6 +725,13 @@ export const useGameState = () => {
             shootPlayerChance += 0.25; // Desperate shoots player almost always to avoid self damage
         }
 
+        // Bluffed: rattled nerve makes him gamble on himself — he swings the
+        // barrel at his own head more often to "prove" nothing scares him.
+        if (rattled) {
+            shootPlayerChance -= 0.18;
+            if (lCount > 0 && bCount > 0 && shootPlayerChance < 0.3) shootPlayerChance = 0.3;
+        }
+
         let shootTarget: 'player' | 'dealer' = Math.random() < Math.max(0.0, Math.min(1.0, shootPlayerChance)) ? 'player' : 'dealer';
         
         // Never shoot self if health is critical and it's a guess (Unless they are arrogant, maybe they risk it? No, keep the core logic)
@@ -631,6 +740,7 @@ export const useGameState = () => {
         }
 
         aiRef.current = false;
+        if (rattled) updateState({ bluffActiveTurns: Math.max(0, currentRef.bluffActiveTurns - 1) });
         // Use fireGun internally, which handles the next state changes
         fireGun(shootTarget, 'dealer');
       };
@@ -656,6 +766,10 @@ export const useGameState = () => {
     startGame,
     fireGun,
     useItem,
-    buyItem
+    buyItem,
+    bluff,
+    registerBulletInserted,
+    completeLoading,
+    autoLoad
   };
 };

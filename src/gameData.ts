@@ -20,3 +20,19 @@ export const DEADLY_QUOTES = [
   "Your hands are shaking. He knows.",
   "Death is impatient today."
 ];
+
+export const BLUFF_QUOTES = [
+  "Your knuckles crack. You lean in and stare him down.",
+  "You slide the cylinder shut with deliberate slowness. The sound is a promise.",
+  "You flash a smile with no warmth behind it. 'Your hands are shaking, old man.'",
+  "You tap the barrel slowly against your palm. Once. Twice. He flinches.",
+  "The silence stretches. You hold his gaze and let him imagine what is loaded.",
+  "A whisper loud enough to be heard: 'I always know. Don't you wonder?'"
+];
+
+export const BLUFF_QUOTES_FAILED = [
+  "The Dealer watches you without blinking. Nothing moves behind his hood.",
+  "He exhales. Your words don't seem to reach him at all.",
+  "A long moment passes. The Dealer's breathing never changes.",
+  "He tilts his head slightly, as if hearing something amusing. You feel small."
+];
