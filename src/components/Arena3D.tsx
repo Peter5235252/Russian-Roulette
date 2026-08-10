@@ -276,6 +276,9 @@ export function Arena3D({
     tickCount: 0,
     time: 0,
     cameraShakeIntensity: 0,
+    cameraKickZ: 0,
+    cameraKickPitch: 0,
+    cameraKickRoll: 0,
     lookTargetY: 0.6,
     deathAnimStartTime: 0,
     loadingAnimStartTime: 0,
@@ -288,6 +291,10 @@ export function Arena3D({
     dealerSmileFactor: 0.0,
     dealerMouthOpenFactor: 0.0,
     dealerHeadTiltFactor: 0.0,
+    nextBlinkTime: 0,
+    blinkStartTime: 0,
+    blinkDuration: 0.15,
+    isDoubleBlinkPending: false,
     activeItemAnimType: null as ItemType | null,
     hasEjectedPliers: false,
     hasSlammedSyringe: false,
@@ -310,8 +317,11 @@ export function Arena3D({
     lastFireTime: 0,
     lastFireIsLive: false,
     hasThumpedPlayerFall: false,
+    hasThumpedPlayerTable: false,
     hasThumpedDealerFall: false,
     dealerDeathStartTime: 0,
+    smoothMouseX: 0,
+    smoothMouseY: 0,
     instantiatedPlayerCount: 0,
     instantiatedDealerCount: 0,
     rebuildRequired: false,
@@ -419,24 +429,171 @@ export function Arena3D({
       return tex;
     };
 
+    const createZippoMesh = (): THREE.Group => {
+      const zippoGroup = new THREE.Group();
+      zippoGroup.name = 'zippoGroup';
+
+      // Brushed Chrome & Metal Materials
+      const chromeMat = new THREE.MeshStandardMaterial({ color: 0xdcdce5, metalness: 0.95, roughness: 0.18 });
+      const darkSteelMat = new THREE.MeshStandardMaterial({ color: 0x555560, metalness: 0.88, roughness: 0.35 });
+      const brassMat = new THREE.MeshStandardMaterial({ color: 0xd4af37, metalness: 0.9, roughness: 0.2 });
+
+      // Lower Case (Lighter Body)
+      const bodyGeo = new THREE.BoxGeometry(0.08, 0.11, 0.042);
+      const lighterBody = new THREE.Mesh(bodyGeo, chromeMat);
+      lighterBody.position.y = 0.055;
+      lighterBody.castShadow = true;
+      zippoGroup.add(lighterBody);
+
+      // Bottom stamp plate / brass base accent line
+      const baseAccent = new THREE.Mesh(new THREE.BoxGeometry(0.078, 0.008, 0.04), brassMat);
+      baseAccent.position.y = 0.004;
+      zippoGroup.add(baseAccent);
+
+      // Steel Inner Insert
+      const insertGeo = new THREE.BoxGeometry(0.074, 0.035, 0.038);
+      const insertMesh = new THREE.Mesh(insertGeo, darkSteelMat);
+      insertMesh.position.y = 0.12;
+      zippoGroup.add(insertMesh);
+
+      // Windproof Chimney (Perforated Guard)
+      const chimneyGeo = new THREE.BoxGeometry(0.05, 0.045, 0.032);
+      const chimney = new THREE.Mesh(chimneyGeo, darkSteelMat);
+      chimney.position.y = 0.145;
+      zippoGroup.add(chimney);
+
+      // Air Vents on Chimney sides
+      const ventGeo = new THREE.BoxGeometry(0.005, 0.032, 0.024);
+      const ventMat = new THREE.MeshStandardMaterial({ color: 0x111115, roughness: 0.9 });
+      const ventLeft = new THREE.Mesh(ventGeo, ventMat);
+      ventLeft.position.set(-0.023, 0.145, 0);
+      const ventRight = new THREE.Mesh(ventGeo, ventMat);
+      ventRight.position.set(0.023, 0.145, 0);
+      zippoGroup.add(ventLeft);
+      zippoGroup.add(ventRight);
+
+      // Wick inside chimney
+      const wickGeo = new THREE.CylinderGeometry(0.004, 0.004, 0.025, 8);
+      const wickMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 1.0 });
+      const wick = new THREE.Mesh(wickGeo, wickMat);
+      wick.position.set(-0.008, 0.155, 0);
+      zippoGroup.add(wick);
+
+      // Flint Wheel
+      const wheelGeo = new THREE.CylinderGeometry(0.012, 0.012, 0.016, 16);
+      const flintWheel = new THREE.Mesh(wheelGeo, darkSteelMat);
+      flintWheel.rotation.z = Math.PI / 2;
+      flintWheel.position.set(0.02, 0.152, 0);
+      zippoGroup.add(flintWheel);
+
+      // Hinge Knuckle
+      const hingeGeo = new THREE.CylinderGeometry(0.005, 0.005, 0.038, 8);
+      const hinge = new THREE.Mesh(hingeGeo, chromeMat);
+      hinge.rotation.x = Math.PI / 2;
+      hinge.position.set(-0.04, 0.11, 0);
+      zippoGroup.add(hinge);
+
+      // Real 3D Flame Group
+      const flameGroup = new THREE.Group();
+      flameGroup.name = 'zippoFlame';
+      flameGroup.position.set(-0.008, 0.165, 0);
+      flameGroup.visible = false;
+
+      const flameGeo = new THREE.ConeGeometry(0.02, 0.08, 10);
+      const flameMat = new THREE.MeshStandardMaterial({
+        color: 0xffaa00,
+        emissive: 0xff6600,
+        emissiveIntensity: 6.0,
+        transparent: true,
+        opacity: 0.95
+      });
+      const flameMesh = new THREE.Mesh(flameGeo, flameMat);
+      flameMesh.position.y = 0.04;
+      flameGroup.add(flameMesh);
+
+      const innerFlameGeo = new THREE.ConeGeometry(0.009, 0.04, 10);
+      const innerFlameMat = new THREE.MeshStandardMaterial({
+        color: 0x66aaff,
+        emissive: 0x0088ff,
+        emissiveIntensity: 8.0,
+        transparent: true,
+        opacity: 0.95
+      });
+      const innerFlameMesh = new THREE.Mesh(innerFlameGeo, innerFlameMat);
+      innerFlameMesh.position.y = 0.02;
+      flameGroup.add(innerFlameMesh);
+
+      const flameLight = new THREE.PointLight(0xffa500, 2.0, 1.8);
+      flameLight.position.y = 0.04;
+      flameGroup.add(flameLight);
+
+      zippoGroup.add(flameGroup);
+
+      // Hinged Cap Group
+      const capGroup = new THREE.Group();
+      capGroup.name = 'zippoCap';
+      capGroup.position.set(-0.04, 0.11, 0);
+      const capMesh = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.055, 0.042), chromeMat);
+      capMesh.position.set(0.04, 0.0275, 0);
+      capGroup.add(capMesh);
+      zippoGroup.add(capGroup);
+
+      return zippoGroup;
+    };
+
     const createItemMesh = (type: ItemType): THREE.Group => {
       const parent = new THREE.Group();
       switch (type) {
         case 'MIRROR': {
-          const fGeo = new THREE.TorusGeometry(0.15, 0.03, 4, 10);
+          const fGeo = new THREE.TorusGeometry(0.15, 0.03, 8, 16);
           const fMesh = new THREE.Mesh(fGeo, rustySteelMat);
           fMesh.position.y = 0.25;
           parent.add(fMesh);
-          const hGeo = new THREE.CylinderGeometry(0.025, 0.025, 0.22, 5);
+
+          const hGeo = new THREE.CylinderGeometry(0.025, 0.025, 0.22, 8);
           const hMesh = new THREE.Mesh(hGeo, rustySteelMat);
           hMesh.position.y = 0.06;
           parent.add(hMesh);
-          const mGeo = new THREE.CylinderGeometry(0.12, 0.12, 0.02, 6);
-          const mMat = new THREE.MeshBasicMaterial({ color: 0x00ffff });
-          const mMesh = new THREE.Mesh(mGeo, mMat);
-          mMesh.rotation.x = Math.PI / 2;
-          mMesh.position.y = 0.25;
-          parent.add(mMesh);
+
+          // Highly reflective silver mirror backing plate
+          const silverGeo = new THREE.CylinderGeometry(0.12, 0.12, 0.01, 16);
+          const silverMat = new THREE.MeshStandardMaterial({
+            color: 0xe2e8f0,
+            metalness: 0.98,
+            roughness: 0.05,
+            envMapIntensity: 2.0,
+          });
+          const silverMesh = new THREE.Mesh(silverGeo, silverMat);
+          silverMesh.rotation.x = Math.PI / 2;
+          silverMesh.position.set(0, 0.25, -0.002);
+          parent.add(silverMesh);
+
+          // Realistic transparent glass front lens layer
+          const glassGeo = new THREE.CylinderGeometry(0.12, 0.12, 0.012, 16);
+          const glassMat = new THREE.MeshStandardMaterial({
+            color: 0xf0f9ff,
+            metalness: 0.1,
+            roughness: 0.02,
+            transparent: true,
+            opacity: 0.35,
+          });
+          const glassMesh = new THREE.Mesh(glassGeo, glassMat);
+          glassMesh.rotation.x = Math.PI / 2;
+          glassMesh.position.set(0, 0.25, 0.002);
+          parent.add(glassMesh);
+
+          // Glass bevel highlight ring
+          const bevelGeo = new THREE.TorusGeometry(0.12, 0.005, 6, 16);
+          const bevelMat = new THREE.MeshStandardMaterial({
+            color: 0xffffff,
+            metalness: 0.2,
+            roughness: 0.0,
+            transparent: true,
+            opacity: 0.6,
+          });
+          const bevelMesh = new THREE.Mesh(bevelGeo, bevelMat);
+          bevelMesh.position.set(0, 0.25, 0.008);
+          parent.add(bevelMesh);
           break;
         }
         case 'PLIERS': {
@@ -453,20 +610,67 @@ export function Arena3D({
         }
         case 'WHISKEY': {
           const botGeo = new THREE.BoxGeometry(0.16, 0.35, 0.16);
-          const botMat = new THREE.MeshStandardMaterial({
-            color: 0xdf8a1c,
+          const glassMat = new THREE.MeshStandardMaterial({
+            color: 0x4a2a10,
             roughness: 0.1,
-            metalness: 0.4,
+            metalness: 0.1,
             transparent: true,
-            opacity: 0.8,
+            opacity: 0.55,
           });
-          const botMesh = new THREE.Mesh(botGeo, botMat);
+          const botMesh = new THREE.Mesh(botGeo, glassMat);
           botMesh.position.y = 0.18;
+          botMesh.name = 'whiskeyBottleMesh';
           parent.add(botMesh);
-          const neckGeo = new THREE.CylinderGeometry(0.045, 0.045, 0.12, 5);
-          const neckMesh = new THREE.Mesh(neckGeo, botMat);
+
+          const liquidGeo = new THREE.BoxGeometry(0.145, 0.31, 0.145);
+          const liquidMat = new THREE.MeshStandardMaterial({
+            color: 0xd97706,
+            roughness: 0.05,
+            metalness: 0.1,
+            transparent: true,
+            opacity: 0.88,
+            emissive: 0x331800,
+          });
+          const liquidMesh = new THREE.Mesh(liquidGeo, liquidMat);
+          liquidMesh.position.y = 0.16;
+          liquidMesh.name = 'whiskeyLiquidMesh';
+          parent.add(liquidMesh);
+
+          const meniscusGeo = new THREE.PlaneGeometry(0.14, 0.14);
+          const meniscusMat = new THREE.MeshStandardMaterial({
+            color: 0xf59e0b,
+            roughness: 0.0,
+            metalness: 0.2,
+            transparent: true,
+            opacity: 0.95,
+            side: THREE.DoubleSide
+          });
+          const meniscus = new THREE.Mesh(meniscusGeo, meniscusMat);
+          meniscus.rotation.x = -Math.PI / 2;
+          meniscus.position.y = 0.315;
+          meniscus.name = 'whiskeyMeniscus';
+          parent.add(meniscus);
+
+          const labelGeo = new THREE.BoxGeometry(0.162, 0.18, 0.005);
+          const labelMat = new THREE.MeshStandardMaterial({
+            color: 0x241408,
+            roughness: 0.6,
+          });
+          const label = new THREE.Mesh(labelGeo, labelMat);
+          label.position.set(0, 0.18, 0.081);
+          parent.add(label);
+
+          const neckGeo = new THREE.CylinderGeometry(0.045, 0.045, 0.12, 8);
+          const neckMesh = new THREE.Mesh(neckGeo, glassMat);
           neckMesh.position.y = 0.4;
           parent.add(neckMesh);
+
+          const corkGeo = new THREE.CylinderGeometry(0.042, 0.038, 0.04, 8);
+          const corkMat = new THREE.MeshStandardMaterial({ color: 0x8b5a2b, roughness: 0.8 });
+          const cork = new THREE.Mesh(corkGeo, corkMat);
+          cork.position.y = 0.46;
+          cork.name = 'whiskeyCork';
+          parent.add(cork);
           break;
         }
         case 'TOURNIQUET': {
@@ -527,37 +731,7 @@ export function Arena3D({
           emberMesh.position.y = 0.27;
           cigGroup.add(emberMesh);
 
-          // 3. Vintage Zippo Lighter placed neatly beside cigarette
-          const zippoGroup = new THREE.Group();
-          zippoGroup.name = 'zippoGroup';
-          zippoGroup.position.set(0.08, 0, 0);
-
-          // Lighter Body (Brushed Chrome)
-          const chromeMat = new THREE.MeshStandardMaterial({ color: 0xd8d8e0, metalness: 0.95, roughness: 0.15 });
-          const lighterBodyGeo = new THREE.BoxGeometry(0.05, 0.08, 0.025);
-          const lighterBody = new THREE.Mesh(lighterBodyGeo, chromeMat);
-          lighterBody.position.y = 0.04;
-          zippoGroup.add(lighterBody);
-
-          // Chimney / Windproof cap chimney
-          const chimneyGeo = new THREE.BoxGeometry(0.03, 0.025, 0.018);
-          const darkChromeMat = new THREE.MeshStandardMaterial({ color: 0x777780, metalness: 0.9, roughness: 0.3 });
-          const chimney = new THREE.Mesh(chimneyGeo, darkChromeMat);
-          chimney.position.y = 0.0925;
-          zippoGroup.add(chimney);
-
-          // Hinged Cap Group (Rotates realistically on hinge)
-          const capGroup = new THREE.Group();
-          capGroup.name = 'zippoCap';
-          capGroup.position.set(-0.025, 0.08, 0); // hinge pivot point
-          const capMesh = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.04, 0.025), chromeMat);
-          capMesh.position.set(0.025, 0.02, 0);
-          capGroup.add(capMesh);
-          zippoGroup.add(capGroup);
-
-          cigGroup.add(zippoGroup);
-
-          // 4. Classic Branded Cigarette Pack on shelf
+          // 3. Classic Branded Cigarette Pack on shelf
           const packGroup = new THREE.Group();
           packGroup.name = 'cigPack';
           packGroup.position.set(-0.08, 0, 0);
@@ -610,52 +784,84 @@ export function Arena3D({
           break;
         }
         case 'SYRINGE': {
-          // Glass/plastic barrel
-          const barrelGeo = new THREE.CylinderGeometry(0.045, 0.045, 0.35, 8);
-          // Adrenaline glowing fluid inside
-          const fluidGeo = new THREE.CylinderGeometry(0.04, 0.04, 0.22, 8);
-          const fluidMat = new THREE.MeshStandardMaterial({
-            color: 0x00ffaa,
-            emissive: 0x004422,
-            roughness: 0.1,
-            metalness: 0.1
-          });
+          const barrelGeo = new THREE.CylinderGeometry(0.045, 0.045, 0.35, 12);
           const glassMat = new THREE.MeshStandardMaterial({
-            color: 0xdddddd,
-            roughness: 0.1,
+            color: 0xeeeeee,
+            roughness: 0.05,
             metalness: 0.1,
             transparent: true,
-            opacity: 0.6
+            opacity: 0.5,
           });
           const barrel = new THREE.Mesh(barrelGeo, glassMat);
           barrel.position.y = 0.245;
+          barrel.name = 'syringeBarrel';
           parent.add(barrel);
 
+          const fluidGeo = new THREE.CylinderGeometry(0.041, 0.041, 0.22, 12);
+          const fluidMat = new THREE.MeshStandardMaterial({
+            color: 0x00ffaa,
+            emissive: 0x006633,
+            roughness: 0.1,
+            metalness: 0.1,
+            transparent: true,
+            opacity: 0.85,
+          });
           const fluid = new THREE.Mesh(fluidGeo, fluidMat);
-          fluid.position.y = 0.2; // sitting lower inside the barrel
+          fluid.position.y = 0.2;
+          fluid.name = 'syringeFluid';
           parent.add(fluid);
 
-          // Finger flanges (top-most ridge)
+          const meniscusGeo = new THREE.CircleGeometry(0.04, 12);
+          const meniscusMat = new THREE.MeshStandardMaterial({
+            color: 0x33ffbb,
+            emissive: 0x11aa66,
+            side: THREE.DoubleSide,
+            transparent: true,
+            opacity: 0.9,
+          });
+          const meniscus = new THREE.Mesh(meniscusGeo, meniscusMat);
+          meniscus.rotation.x = -Math.PI / 2;
+          meniscus.position.y = 0.31;
+          meniscus.name = 'syringeMeniscus';
+          parent.add(meniscus);
+
+          const bubbleGeo = new THREE.SphereGeometry(0.012, 8, 8);
+          const bubbleMat = new THREE.MeshStandardMaterial({
+            color: 0xaaffdd,
+            roughness: 0.1,
+            transparent: true,
+            opacity: 0.5,
+          });
+          const bubble = new THREE.Mesh(bubbleGeo, bubbleMat);
+          bubble.position.set(0.015, 0.28, 0);
+          bubble.name = 'syringeBubble';
+          parent.add(bubble);
+
+          const plungerGeo = new THREE.CylinderGeometry(0.008, 0.008, 0.16, 6);
+          const plungerMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.6 });
+          const plunger = new THREE.Mesh(plungerGeo, plungerMat);
+          plunger.position.y = 0.48;
+          plunger.name = 'syringePlunger';
+          parent.add(plunger);
+
+          const stopperGeo = new THREE.CylinderGeometry(0.041, 0.041, 0.02, 10);
+          const stopperMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.9 });
+          const stopper = new THREE.Mesh(stopperGeo, stopperMat);
+          stopper.position.y = 0.32;
+          stopper.name = 'syringeStopper';
+          parent.add(stopper);
+
           const flangeGeo = new THREE.BoxGeometry(0.12, 0.015, 0.045);
           const metalMat = new THREE.MeshStandardMaterial({ color: 0x888888, metalness: 0.8, roughness: 0.2 });
           const flange = new THREE.Mesh(flangeGeo, metalMat);
           flange.position.y = 0.42;
           parent.add(flange);
 
-          // Plunger stick sticking out of the top flange
-          const plungerGeo = new THREE.CylinderGeometry(0.01, 0.01, 0.12, 5);
-          const plungerMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.7 });
-          const plunger = new THREE.Mesh(plungerGeo, plungerMat);
-          plunger.position.y = 0.48;
-          parent.add(plunger);
-
-          // Needle hub at the bottom tip
-          const hubGeo = new THREE.CylinderGeometry(0.02, 0.01, 0.05, 6);
+          const hubGeo = new THREE.CylinderGeometry(0.02, 0.01, 0.05, 8);
           const hub = new THREE.Mesh(hubGeo, metalMat);
           hub.position.y = 0.045;
           parent.add(hub);
 
-          // Fine metal needle itself
           const needleGeo = new THREE.CylinderGeometry(0.004, 0.004, 0.12, 4);
           const needle = new THREE.Mesh(needleGeo, metalMat);
           needle.position.y = -0.04;
@@ -1138,10 +1344,8 @@ export function Arena3D({
     faceCavity.position.set(0, 2.7, 0.45);
     dealerGroup.add(faceCavity);
 
-    // Glowing red skeletal eyes
-    const eyeGeo = isUltra 
-      ? new THREE.SphereGeometry(0.045, 16, 16)
-      : (isHigh ? new THREE.SphereGeometry(0.045, 8, 8) : new THREE.BoxGeometry(0.08, 0.08, 0.08));
+    // Glowing red skeletal eyes with sharp faceted low-poly geometry across all settings
+    const eyeGeo = new THREE.IcosahedronGeometry(0.052, 0); // Crisp 20-facet low-poly polyhedron
     const leftEyeMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
     const rightEyeMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
     const leftEye = new THREE.Mesh(eyeGeo, leftEyeMat);
@@ -1151,25 +1355,58 @@ export function Arena3D({
     dealerGroup.add(leftEye);
     dealerGroup.add(rightEye);
 
-    // Glitchy mask line (Mouth structure featuring smooth dynamic smiles!)
+    // Faceted low-poly eye sockets / orbit frames framing the glowing eyes
+    const eyeSocketGeo = new THREE.BoxGeometry(0.13, 0.13, 0.04);
+    const eyeSocketMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.9, metalness: 0.8 });
+    const leftSocket = new THREE.Mesh(eyeSocketGeo, eyeSocketMat);
+    leftSocket.position.set(-0.16, 2.75, 0.53);
+    const rightSocket = new THREE.Mesh(eyeSocketGeo, eyeSocketMat);
+    rightSocket.position.set(0.16, 2.75, 0.53);
+    dealerGroup.add(leftSocket);
+    dealerGroup.add(rightSocket);
+
+    // Expressive, low-poly angular eyebrows that tilt and furrow dynamically
+    const browGeo = new THREE.BoxGeometry(0.14, 0.035, 0.06);
+    const browMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.8, metalness: 0.5 });
+    const leftBrow = new THREE.Mesh(browGeo, browMat);
+    leftBrow.position.set(-0.16, 2.82, 0.58);
+    const rightBrow = new THREE.Mesh(browGeo, browMat);
+    rightBrow.position.set(0.16, 2.82, 0.58);
+    dealerGroup.add(leftBrow);
+    dealerGroup.add(rightBrow);
+
+    // Multi-segmented articulate mask line & mouth structure
     const dealerMouthGroup = new THREE.Group();
     dealerMouthGroup.position.set(0, 2.52, 0.56);
     dealerGroup.add(dealerMouthGroup);
 
-    const mouthBoxGeo = isUltra ? new THREE.CylinderGeometry(0.015, 0.015, 0.12, 16).rotateZ(Math.PI / 2) : new THREE.BoxGeometry(0.12, 0.03, 0.05);
-    const mouthSideBoxGeo = isUltra ? new THREE.CylinderGeometry(0.012, 0.012, 0.1, 16).rotateZ(Math.PI / 2) : new THREE.BoxGeometry(0.1, 0.03, 0.05);
+    const mouthCenterGeo = new THREE.BoxGeometry(0.12, 0.028, 0.05);
+    const mouthSideMidGeo = new THREE.BoxGeometry(0.08, 0.024, 0.04);
+    const mouthSideCornerGeo = new THREE.BoxGeometry(0.06, 0.022, 0.04);
 
-    const mouthCenter = new THREE.Mesh(mouthBoxGeo, maskLineMat);
+    const mouthCenter = new THREE.Mesh(mouthCenterGeo, maskLineMat);
     mouthCenter.position.set(0, 0, 0);
     dealerMouthGroup.add(mouthCenter);
 
-    const mouthLeft = new THREE.Mesh(mouthSideBoxGeo, maskLineMat);
-    mouthLeft.position.set(-0.1, 0, 0);
-    dealerMouthGroup.add(mouthLeft);
+    const mouthLeftMid = new THREE.Mesh(mouthSideMidGeo, maskLineMat);
+    mouthLeftMid.position.set(-0.08, 0, 0);
+    dealerMouthGroup.add(mouthLeftMid);
 
-    const mouthRight = new THREE.Mesh(mouthSideBoxGeo, maskLineMat);
-    mouthRight.position.set(0.1, 0, 0);
-    dealerMouthGroup.add(mouthRight);
+    const mouthLeftCorner = new THREE.Mesh(mouthSideCornerGeo, maskLineMat);
+    mouthLeftCorner.position.set(-0.14, 0, 0);
+    dealerMouthGroup.add(mouthLeftCorner);
+
+    const mouthLeft = mouthLeftCorner; // compatibility
+
+    const mouthRightMid = new THREE.Mesh(mouthSideMidGeo, maskLineMat);
+    mouthRightMid.position.set(0.08, 0, 0);
+    dealerMouthGroup.add(mouthRightMid);
+
+    const mouthRightCorner = new THREE.Mesh(mouthSideCornerGeo, maskLineMat);
+    mouthRightCorner.position.set(0.14, 0, 0);
+    dealerMouthGroup.add(mouthRightCorner);
+
+    const mouthRight = mouthRightCorner; // compatibility
 
     // --- CYLINDER MONITOR (The big revolving visual indicator) ---
     const cylinderUIGroup = new THREE.Group();
@@ -3173,13 +3410,20 @@ export function Arena3D({
         const targetRotY = Math.sin(time * 0.9) * 0.04;
         let targetRotX = 0;
 
-        // APPLY SUBTLE RECOIL IF DAMAGED
+        // VISCERAL DEALER RECOIL & FLINCH WHEN DAMAGED / SHOT
         let flinchZ = 0;
-        if (flinchTimeElapsed < 400) {
-          const t = flinchTimeElapsed / 400;
-          const recoilIntensity = Math.sin(t * Math.PI) * 0.25;
-          flinchZ = -recoilIntensity; // Minimal jolt back
-          targetRotX += recoilIntensity * 0.1; 
+        if (flinchTimeElapsed < 650) {
+          const t = flinchTimeElapsed / 650;
+          // Explosive backward impulse with elastic spring recoil
+          const impulse = Math.sin(Math.pow(t, 0.35) * Math.PI);
+          flinchZ = -0.72 * impulse; // Heavy visceral backward blowback
+          targetRotX = -0.35 * impulse; // Torso & head throw back
+          jitterRotZ += (Math.sin(time * 35) * 0.08) * (1.0 - t); // Spasmic muscle shiver
+          
+          // Expressive recoil reaction: Head throws back, mouth opens in shock, eyebrows furrow
+          ar.dealerHeadTiltFactor = Math.max(ar.dealerHeadTiltFactor, 0.9 * impulse);
+          ar.dealerMouthOpenFactor = Math.max(ar.dealerMouthOpenFactor, 0.7 * impulse);
+          ar.dealerSmileFactor *= (1.0 - impulse);
         } else {
           if (personality !== 'DESPERATE') dealerGroup.position.x = 0;
           dealerGroup.rotation.z = Math.cos(time * 1.2) * 0.025;
@@ -3190,18 +3434,29 @@ export function Arena3D({
         dealerGroup.rotation.y = dealerGroup.rotation.y * (1 - damp(0.16)) + (targetRotY + jitterRotY) * damp(0.16);
         dealerGroup.rotation.z = (flinchTimeElapsed >= 400 ? Math.cos(time * 1.2) * 0.025 : dealerGroup.rotation.z) + jitterRotZ;
 
-        // Realistic blinking
-        const blinkCycle = time % 15;
+        // Natural periodic blinking logic
+        if (ar.nextBlinkTime === 0) {
+          ar.nextBlinkTime = time + 1.5 + Math.random() * 3.0;
+        }
+
+        if (time >= ar.nextBlinkTime) {
+          ar.blinkStartTime = time;
+          ar.blinkDuration = 0.13 + Math.random() * 0.05; // 130ms - 180ms natural blink
+          ar.nextBlinkTime = time + 2.2 + Math.random() * 4.2; // Next blink in 2.2 - 6.4 seconds
+          if (Math.random() < 0.2) {
+            ar.isDoubleBlinkPending = true;
+          }
+        }
+
         let blinkScaleY = 1.0;
-        if (blinkCycle > 4.0 && blinkCycle < 4.15) {
-          // Quick single blink
-          blinkScaleY = Math.max(0.1, 1.0 - Math.sin((blinkCycle - 4.0) / 0.15 * Math.PI) * 0.9);
-        } else if (blinkCycle > 9.0 && blinkCycle < 9.15) {
-          // Double blink 1
-          blinkScaleY = Math.max(0.1, 1.0 - Math.sin((blinkCycle - 9.0) / 0.15 * Math.PI) * 0.9);
-        } else if (blinkCycle > 9.25 && blinkCycle < 9.4) {
-          // Double blink 2
-          blinkScaleY = Math.max(0.1, 1.0 - Math.sin((blinkCycle - 9.25) / 0.15 * Math.PI) * 0.9);
+        const blinkElapsed = time - ar.blinkStartTime;
+        if (blinkElapsed >= 0 && blinkElapsed <= ar.blinkDuration) {
+          const blinkT = blinkElapsed / ar.blinkDuration;
+          blinkScaleY = Math.max(0.05, 1.0 - Math.sin(blinkT * Math.PI) * 0.95);
+        } else if (ar.isDoubleBlinkPending && blinkElapsed > ar.blinkDuration + 0.08) {
+          ar.isDoubleBlinkPending = false;
+          ar.blinkStartTime = time;
+          ar.blinkDuration = 0.11;
         }
 
         if (isShootDealerHovered && latest.showControls) {
@@ -3259,16 +3514,63 @@ export function Arena3D({
         // Dealer Head Tilt Back when drinking or smoking
         dealerGroup.rotation.x = -0.22 * tiltFactor;
 
-        // Bender mouth coordinate translations (Smile + Mouth Opening)
-        mouthCenter.position.y = -0.015 * ar.dealerSmileFactor - 0.08 * openFactor;
-        
-        mouthLeft.position.x = -0.10;
-        mouthLeft.position.y = 0.048 * ar.dealerSmileFactor - 0.04 * openFactor;
-        mouthLeft.rotation.z = -0.68 * ar.dealerSmileFactor + 0.3 * openFactor;
+        // Multi-jointed angular mask line translations (Smile + Speaking/Opening Movement)
+        const smile = ar.dealerSmileFactor;
+        const talkMutter = (latest.gameState === 'DEALER_TURN' || latest.gameState === 'AI_THINKING') ? Math.sin(time * 18) * 0.03 : 0;
+        const totalOpen = Math.max(0, openFactor + talkMutter);
 
-        mouthRight.position.x = 0.10;
-        mouthRight.position.y = 0.048 * ar.dealerSmileFactor - 0.04 * openFactor;
-        mouthRight.rotation.z = 0.68 * ar.dealerSmileFactor - 0.3 * openFactor;
+        // Single clean center bar
+        mouthCenter.position.y = -0.015 * smile - 0.04 * totalOpen;
+
+        // Mid lip joints bend smoothly with smile curve
+        mouthLeftMid.position.x = -0.075;
+        mouthLeftMid.position.y = 0.028 * smile - 0.03 * totalOpen;
+        mouthLeftMid.rotation.z = -0.45 * smile + 0.2 * totalOpen;
+
+        mouthRightMid.position.x = 0.075;
+        mouthRightMid.position.y = 0.028 * smile - 0.03 * totalOpen;
+        mouthRightMid.rotation.z = 0.45 * smile - 0.2 * totalOpen;
+
+        // Outer corner joints bow outward & flare up into sinister wide grin
+        mouthLeftCorner.position.x = -0.135;
+        mouthLeftCorner.position.y = 0.065 * smile - 0.02 * totalOpen;
+        mouthLeftCorner.rotation.z = -0.75 * smile + 0.3 * totalOpen;
+
+        mouthRightCorner.position.x = 0.135;
+        mouthRightCorner.position.y = 0.065 * smile - 0.02 * totalOpen;
+        mouthRightCorner.rotation.z = 0.75 * smile - 0.3 * totalOpen;
+
+        // Dynamic Eyebrow Expression Mechanics
+        let targetBrowAngleL = -0.12;
+        let targetBrowAngleR = 0.12;
+        let targetBrowY = 2.82;
+
+        if (isShootDealerHovered && latest.showControls) {
+          // Threat/Flinch response: Angry, hostile V-furrowed brow
+          targetBrowAngleL = -0.38;
+          targetBrowAngleR = 0.38;
+          targetBrowY = 2.79;
+        } else if (personality === 'DESPERATE') {
+          // Panicked / distressed inward slope
+          targetBrowAngleL = 0.22;
+          targetBrowAngleR = -0.22;
+          targetBrowY = 2.81;
+        } else if (smile > 0.1) {
+          // Asymmetric arrogant/smug raised eyebrow
+          targetBrowAngleL = 0.28;
+          targetBrowAngleR = -0.12;
+          targetBrowY = 2.84;
+        } else {
+          // Resting slight sinister slant
+          targetBrowAngleL = -0.12;
+          targetBrowAngleR = 0.12;
+          targetBrowY = 2.82;
+        }
+
+        leftBrow.position.y = targetBrowY;
+        leftBrow.rotation.z = targetBrowAngleL;
+        rightBrow.position.y = targetBrowY;
+        rightBrow.rotation.z = targetBrowAngleR;
 
         const isDealerHigh = latest.dealerDamageReductionEnd && Date.now() < latest.dealerDamageReductionEnd;
 
@@ -3300,51 +3602,154 @@ export function Arena3D({
             (rightEye.material as THREE.MeshBasicMaterial).color.setHex(0xff0000);
           }
         }
+        // Reset head pose when alive
+        hoodMesh.position.set(0, 2.7, 0.1);
+        hoodMesh.rotation.set(0, 0, 0);
+        ar.dealerDeathStartTime = 0;
+        ar.hasThumpedDealerFall = false;
       } else {
-        // Dealer is Dead!
+        // --- VISCERAL BACKWARD RAGDOLL PHYSICS COLLAPSE ANIMATION ---
         if (ar.dealerDeathStartTime === 0) ar.dealerDeathStartTime = Date.now();
         const deathElapsed = (Date.now() - ar.dealerDeathStartTime) / 1000;
 
-        // Smooth physical falling back and down behind himself
-        const fallProgress = Math.min(1.0, deathElapsed / 0.38); // falls back over 0.38s
-        const easeFall = fallProgress * fallProgress; // acceleration curve
+        // Total collapse timeline: ~2.5 seconds
+        // Phase 1 (0.0s - 0.4s): Kinetic Bullet Impact & Violent Backward Torso Snap
+        // Phase 2 (0.4s - 1.35s): Gravitational Freefall Backward & Chair Flipping
+        // Phase 3 (1.35s - 1.85s): Concrete Floor Impact & Elastic Ragdoll Rebound
+        // Phase 4 (1.85s+): Sprawled Limp Resting State
 
-        // Rotate backwards on X-axis (tilting high back into absolute darkness)
-        dealerGroup.rotation.x = -Math.PI / 1.7 * easeFall;
-        
-        // Minor violent horizontal dying shivers/convulsions that damp out upon hitting floor
-        const shiverMultiplier = Math.max(0, 1.0 - fallProgress);
-        dealerGroup.position.x = (Math.random() - 0.5) * 0.18 * shiverMultiplier + Math.sin(time * 35) * 0.06 * shiverMultiplier;
-        
-        // Pivot/sink down and backward
-        dealerGroup.position.y = -0.4 - (1.45 * easeFall);
-        dealerGroup.position.z = -3.2 - (1.15 * easeFall);
+        if (deathElapsed < 0.4) {
+          // Phase 1: Sudden Kinetic Impact - Chest arches back, head snaps violently back
+          const t1 = deathElapsed / 0.4;
+          const ease1 = t1 * t1;
 
-        // Keep the dealer fully scale-represented instead of instantly disappearing!
-        dealerGroup.scale.setScalar(1.0);
+          dealerGroup.position.x = (Math.random() - 0.5) * 0.06 * (1 - t1) + Math.sin(time * 30) * 0.03 * (1 - t1);
+          dealerGroup.position.y = -0.4 - (0.18 * ease1);
+          dealerGroup.position.z = -3.2 - (0.35 * ease1); // Driven backward by impact
+          dealerGroup.rotation.x = -0.45 * ease1; // Torso thrown backward
+          dealerGroup.rotation.z = 0.12 * ease1; // Asymmetric shoulder drop
 
-        // Sound trigger of the massive full-hooded mass hitting the hardwood floor!
-        if (fallProgress >= 1.0 && !ar.hasThumpedDealerFall) {
-          ar.hasThumpedDealerFall = true;
-          playThumpSound();
-          vibrateGamepad('jolt');
+          // Head snaps backward limply on neck
+          hoodMesh.position.z = 0.1 - 0.20 * ease1;
+          hoodMesh.rotation.x = -0.55 * ease1;
+          hoodMesh.rotation.z = 0.15 * ease1;
+
+          // Eye glow flickers out instantly
+          const flicker = Math.max(0, (1.0 - t1) * (0.8 + Math.sin(time * 50) * 0.2));
+          leftEye.scale.setScalar(flicker);
+          rightEye.scale.setScalar(flicker);
+
+          const chair = scene.getObjectByName('dealerChairGroup');
+          if (chair) {
+            chair.rotation.x = -0.28 * ease1; // Chair begins tipping back
+            chair.position.z = -3.2 - (0.18 * ease1);
+          }
+        } else if (deathElapsed < 1.35) {
+          // Phase 2: Full Gravitational Fall Backward & Chair Tipping Over
+          const t2 = (deathElapsed - 0.4) / 0.95;
+          const gravityAccel = Math.pow(t2, 2.2); // Heavy exponential acceleration
+
+          const targetY = -0.58 - (1.45 * gravityAccel);
+          const targetZ = -3.55 - (1.35 * gravityAccel);
+          
+          const shiver = (1.0 - t2) * 0.04;
+          dealerGroup.position.x = (Math.random() - 0.5) * shiver + Math.sin(time * 20) * shiver;
+          dealerGroup.position.y = targetY;
+          dealerGroup.position.z = targetZ;
+
+          // Rotates flat backward onto spine
+          dealerGroup.rotation.x = -0.45 - (1.25 * gravityAccel);
+          dealerGroup.rotation.z = 0.12 + (0.28 * gravityAccel);
+
+          // Neck & head ragdoll back then flop sideways onto shoulder
+          hoodMesh.position.z = -0.10 - (0.15 * t2);
+          hoodMesh.rotation.x = -0.55 - (0.35 * gravityAccel);
+          hoodMesh.rotation.y = 0.42 * gravityAccel;
+          hoodMesh.rotation.z = -0.35 * gravityAccel;
+
+          leftEye.scale.setScalar(0);
+          rightEye.scale.setScalar(0);
+
+          const chair = scene.getObjectByName('dealerChairGroup');
+          if (chair) {
+            const chairFall = Math.pow(t2, 2.0);
+            chair.rotation.x = -0.28 - (Math.PI / 1.8 - 0.28) * chairFall;
+            chair.rotation.z = 0.18 * chairFall; // Twisted angle as chair crashes back
+            chair.position.y = -1.2 + Math.sin(t2 * Math.PI) * 0.18;
+            chair.position.z = -3.38 - (0.85 * chairFall);
+          }
+        } else if (deathElapsed < 1.85) {
+          // Phase 3: Heavy Floor Impact & Ragdoll Rebound
+          const t3 = deathElapsed - 1.35;
+
+          if (!ar.hasThumpedDealerFall) {
+            ar.hasThumpedDealerFall = true;
+            import('../audio').then(a => a.playThumpSound());
+            vibrateGamepad('jolt', { duration: 250, weak: 1.0, strong: 1.0 });
+
+            // Violent impact screen shake & camera kick
+            ar.cameraShakeIntensity = 1.2;
+            ar.cameraKickZ = 0.15;
+
+            const impactPos = new THREE.Vector3(0, -0.9, -4.8);
+            spawnParticles(impactPos, 0x111111, 30, 0.18, -0.001, 'SMOKE');
+            spawnParticles(impactPos, 0x880000, 25, 0.12, -0.002, 'BLOOD');
+          }
+
+          // Ragdoll dampening bounce off concrete floor
+          const bounceFactor = Math.exp(-6.0 * t3) * Math.sin(16 * t3) * 0.12;
+
+          dealerGroup.position.x = 0.06;
+          dealerGroup.position.y = -1.98 + bounceFactor;
+          dealerGroup.position.z = -4.85;
+
+          dealerGroup.rotation.x = -1.62 - (bounceFactor * 0.8);
+          dealerGroup.rotation.z = 0.22 + (bounceFactor * 0.3);
+
+          const flopT = Math.min(1.0, t3 / 0.35);
+          hoodMesh.position.set(0, 2.7, -0.05);
+          hoodMesh.rotation.x = -0.75;
+          hoodMesh.rotation.z = -0.52 * flopT;
+          hoodMesh.rotation.y = 0.45 * flopT;
+
+          leftEye.scale.setScalar(0);
+          rightEye.scale.setScalar(0);
+
+          const chair = scene.getObjectByName('dealerChairGroup');
+          if (chair) {
+            const chairBounce = Math.exp(-7.0 * t3) * Math.sin(14 * t3) * 0.08;
+            chair.rotation.x = -Math.PI / 1.8 + chairBounce;
+            chair.rotation.z = 0.18;
+            chair.position.y = -1.2 + Math.abs(chairBounce) * 0.6;
+            chair.position.z = -4.20;
+          }
+        } else {
+          // Phase 4: Final Sprawled Limp Resting State
+          const settleT = deathElapsed - 1.85;
+          const residualTremor = Math.exp(-3.5 * settleT) * Math.sin(18 * settleT) * 0.004;
+
+          dealerGroup.position.set(0.06 + residualTremor, -1.98, -4.85);
+          dealerGroup.rotation.set(-1.62, 0, 0.22);
+
+          hoodMesh.position.set(0, 2.7, -0.05);
+          hoodMesh.rotation.set(-0.75, 0.45, -0.52);
+
+          leftEye.scale.setScalar(0);
+          rightEye.scale.setScalar(0);
+
+          const chair = scene.getObjectByName('dealerChairGroup');
+          if (chair) {
+            chair.rotation.set(-Math.PI / 1.8, 0, 0.18);
+            chair.position.set(0, -1.2, -4.20);
+          }
         }
       }
 
       const chair = scene.getObjectByName('dealerChairGroup');
-      if (chair) {
-        if (latest.dealerHealth <= 0) {
-           const deathElapsed = (Date.now() - (ar.dealerDeathStartTime || Date.now())) / 1000;
-           const fallProgress = Math.min(1.0, deathElapsed / 0.38);
-           const easeFall = fallProgress * fallProgress;
-           chair.rotation.x = -Math.PI / 2 * easeFall; // tip backwards
-           chair.position.y = -1.2; // keep base on the floor
-           chair.position.z = -3.2 - (0.5 * easeFall); // push back slightly
-        } else {
-           chair.rotation.x = chair.rotation.x * (1 - damp(0.1));
-           chair.position.y = chair.position.y * (1 - damp(0.1)) + -1.2 * damp(0.1);
-           chair.position.z = chair.position.z * (1 - damp(0.1)) + -3.2 * damp(0.1);
-        }
+      if (chair && latest.dealerHealth > 0) {
+         chair.rotation.x = chair.rotation.x * (1 - damp(0.1));
+         chair.position.y = chair.position.y * (1 - damp(0.1)) + -1.2 * damp(0.1);
+         chair.position.z = chair.position.z * (1 - damp(0.1)) + -3.2 * damp(0.1);
       }
 
       // Visual holographic cylinder indicator rotational snapping
@@ -3431,7 +3836,7 @@ export function Arena3D({
             gunGroup.rotation.y = gunGroup.rotation.y * (1 - damp(0.12)) + finalAimRot.y * damp(0.12);
             gunGroup.rotation.z = gunGroup.rotation.z * (1 - damp(0.12)) + finalAimRot.z * damp(0.12);
             
-            if (elapsedMs > 450) {
+            if (elapsedMs > 50) {
               if (!ar.hasCockingSoundPlayed) {
                 ar.hasCockingSoundPlayed = true;
                 import('../audio').then(a => a.playCockSound());
@@ -3439,7 +3844,7 @@ export function Arena3D({
                     vibrateGamepad('jolt', { duration: 50, weak: 0.1, strong: 0.8 });
                 }
               }
-              const t = (elapsedMs - 450) / 300;
+              const t = Math.min(1.0, (elapsedMs - 50) / 350);
               const easeT = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
               hammerMesh.rotation.x = -0.15 - (0.6 * easeT);
             } else {
@@ -3507,7 +3912,34 @@ export function Arena3D({
 
             if (ar.animIsLive) {
               ar.lastFireIsLive = true;
-              ar.cameraShakeIntensity = 2.2; // heavy burst screenshake!
+
+              // Direct Visceral Camera Kickback
+              if (ar.animTarget === 'player') {
+                // Player gets shot by Dealer or Self
+                ar.cameraKickZ = 0.62; // Violent backward jolt on camera
+                ar.cameraKickPitch = -0.38; // Upward camera pitch kick
+                ar.cameraKickRoll = (Math.random() > 0.5 ? 0.22 : -0.22); // Impact roll
+                ar.cameraShakeIntensity = 4.8;
+
+                spawnScreenSplat();
+                setTimeout(spawnScreenSplat, 100);
+                setTimeout(spawnScreenSplat, 250);
+                vibrateGamepad('jolt', { duration: 250, weak: 1.0, strong: 1.0 });
+              } else {
+                // Player shoots Dealer or Dealer shoots self
+                ar.cameraKickZ = 0.32; // Firing heavy gun kickback
+                ar.cameraKickPitch = -0.22; // Muzzle climb
+                ar.cameraKickRoll = (Math.random() > 0.5 ? 0.09 : -0.09);
+                ar.cameraShakeIntensity = 3.6;
+
+                vibrateGamepad('jolt', { duration: 180, weak: 0.8, strong: 0.9 });
+              }
+
+              if (ar.animTarget === 'dealer') {
+                stateRef.current.dealerFlinchTime = Date.now();
+                const muzzleWorldPos = new THREE.Vector3(0, 0.18, 0.9).applyMatrix4(gunGroup.matrixWorld);
+                spawnParticles(muzzleWorldPos, 0x880000, 80, 0.45, 0.002, 'BLOOD');
+              }
 
               const muzzleWorldPos = new THREE.Vector3(0, 0.18, 0.9).applyMatrix4(gunGroup.matrixWorld);
               const chamberWorldPos = new THREE.Vector3(0.12, 0.12, -0.15).applyMatrix4(gunGroup.matrixWorld);
@@ -3520,14 +3952,12 @@ export function Arena3D({
               spawnParticles(muzzleWorldPos, 0xffaa00, 85, 0.5, 0.001, 'SPARK'); 
               spawnParticles(muzzleWorldPos, 0xd01010, 800, 0.85, 0.0035, 'BLOOD'); // Massively intense visceral blood splatter!
               spawnParticles(muzzleWorldPos, 0xaaaaaa, 65, 0.65, -0.0018, 'SMOKE');
-
-              if (ar.animTarget === 'dealer') {
-                dealerGroup.position.z -= 0.85; // blow back dealer mesh
-              }
             } else {
-              // Dry blank click -> eject blank casing
+              // Dry blank click -> extremely subtle mechanical click feedback
               ar.lastFireIsLive = false;
-              ar.cameraShakeIntensity = 0.15;
+              ar.cameraShakeIntensity = 0.04;
+              ar.cameraKickZ = 0.005;
+              ar.cameraKickPitch = -0.003;
 
               const chamberWorldPos = new THREE.Vector3(0.12, 0.12, -0.15).applyMatrix4(gunGroup.matrixWorld);
               spawnParticles(chamberWorldPos, 0x1e8bc3, 1, 0.12, 0.0038, 'SHELL');
@@ -3593,9 +4023,9 @@ export function Arena3D({
                  kickForce = fade * fade;
                }
                if (ar.animTarget === 'player') {
-                 recoilBasePos.z -= 0.12 * kickForce;
+                 recoilBasePos.z -= 0.015 * kickForce;
                } else {
-                 recoilBasePos.z += 0.12 * kickForce;
+                 recoilBasePos.z += 0.015 * kickForce;
                }
             }
 
@@ -3839,9 +4269,16 @@ export function Arena3D({
           case 'WHISKEY': {
             const isPlayer = ar.activeItemAnimUser === 'player';
             const lipsPos = isPlayer ? new THREE.Vector3(0, 1.3, 1.8) : new THREE.Vector3(0, 2.12, -2.64);
-            
-            // The spout is locally at y = 0.46 (botMesh=0.35 + neckMesh=0.12 = 0.47 roughly)
             const localSpout = new THREE.Vector3(0, 0.46, 0);
+
+            let liquidMesh: THREE.Mesh | null = null;
+            let meniscusMesh: THREE.Mesh | null = null;
+            let corkMesh: THREE.Mesh | null = null;
+            ar.activeItemAnimGroup.traverse((child) => {
+              if (child.name === 'whiskeyLiquidMesh') liquidMesh = child as THREE.Mesh;
+              if (child.name === 'whiskeyMeniscus') meniscusMesh = child as THREE.Mesh;
+              if (child.name === 'whiskeyCork') corkMesh = child as THREE.Mesh;
+            });
 
             if (elapsedSec < 1.2) {
               const t = elapsedSec / 1.2;
@@ -3849,28 +4286,36 @@ export function Arena3D({
               
               ar.activeItemAnimGroup.rotation.set(isPlayer ? Math.PI / 4 : -Math.PI / 4, 0, 0);
               
-              // Calculate target group position so that the spout lands exactly on lips
               const targetSpoutOffset = localSpout.clone().applyEuler(ar.activeItemAnimGroup.rotation);
               const targetGroupPos = lipsPos.clone().sub(targetSpoutOffset);
               
-              ar.activeItemAnimGroup.position.lerpVectors(
-                startPos,
-                targetGroupPos,
-                t
-              );
+              ar.activeItemAnimGroup.position.lerpVectors(startPos, targetGroupPos, t);
               
               if (!isPlayer) {
                 ar.dealerMouthOpenFactor = t * 0.5;
                 ar.dealerHeadTiltFactor = t * 0.4;
               }
+
+              // Liquid sloshes in bottle during pickup
+              if (liquidMesh && meniscusMesh) {
+                const sloshWave = Math.sin(time * 12) * 0.02;
+                liquidMesh.rotation.z = sloshWave;
+                meniscusMesh.position.y = 0.315 + sloshWave * 0.5;
+              }
             } else if (elapsedSec < 3.0) {
-              // Tilt bottle way back and gurgle
+              // Pop cork on first frame of drinking
+              if (corkMesh && corkMesh.visible) {
+                corkMesh.visible = false;
+                const corkWorldPos = new THREE.Vector3(0, 0.46, 0).applyMatrix4(ar.activeItemAnimGroup.matrixWorld);
+                spawnParticles(corkWorldPos, 0x8b5a2b, 1, 0.15, 0.003, 'SHELL');
+              }
+
               const tiltT = Math.min(1.0, (elapsedSec - 1.2) / 0.8);
+              const drainT = Math.min(1.0, (elapsedSec - 1.2) / 1.6);
               
-              // Tilt back: player tilts positive X, dealer tilts negative X
               const rotX = isPlayer ? 
-                (Math.PI / 4 + tiltT * Math.PI * 0.45) : 
-                (-Math.PI / 4 - tiltT * Math.PI * 0.45);
+                (Math.PI / 4 + tiltT * Math.PI * 0.48) : 
+                (-Math.PI / 4 - tiltT * Math.PI * 0.48);
 
               ar.activeItemAnimGroup.rotation.set(
                 rotX,
@@ -3878,7 +4323,6 @@ export function Arena3D({
                 tiltT * (isPlayer ? 0.3 : -0.3)
               );
               
-              // Pin the spout to the lips, adjust body position accordingly
               const currentSpoutOffset = localSpout.clone().applyEuler(ar.activeItemAnimGroup.rotation);
               ar.activeItemAnimGroup.position.copy(lipsPos).sub(currentSpoutOffset);
 
@@ -3886,15 +4330,25 @@ export function Arena3D({
                 ar.dealerMouthOpenFactor = 1.0;
                 ar.dealerHeadTiltFactor = 1.0;
               }
+
+              // Realistic Liquid Level & Sloshing Drain Physics
+              if (liquidMesh && meniscusMesh) {
+                const remainingRatio = Math.max(0.01, 1.0 - drainT);
+                liquidMesh.scale.y = remainingRatio;
+                liquidMesh.position.y = 0.16 * remainingRatio;
+                
+                const sloshWave = Math.sin(time * 18) * 0.03 * remainingRatio;
+                meniscusMesh.position.y = 0.315 * remainingRatio + sloshWave;
+                meniscusMesh.scale.set(remainingRatio, remainingRatio, remainingRatio);
+              }
               
               const spoutPos = localSpout.clone().applyMatrix4(ar.activeItemAnimGroup.matrixWorld);
               
-              // Gurgle particles (more realistic)
-              if (Math.random() < 0.45) {
-                spawnParticles(spoutPos, 0xbf7713, 3, 0.03, 0.003, 'LIQUID');
+              if (Math.random() < 0.65 && drainT < 0.95) {
+                spawnParticles(spoutPos, 0xdf8a1c, 4, 0.04, 0.003, 'LIQUID');
+                spawnParticles(spoutPos, 0xf59e0b, 2, 0.02, 0.002, 'LIQUID');
               }
             } else {
-              // Physics toss empty whiskey bottle
               discardItemPhysics(ar.activeItemAnimGroup, ar.activeItemAnimUser || 'player');
               ar.activeItemAnimGroup = null;
             }
@@ -3960,18 +4414,27 @@ export function Arena3D({
           case 'CIGARETTE': {
             const isPlayerUser = ar.activeItemAnimUser === 'player';
             const lipsPos = isPlayerUser 
-              ? new THREE.Vector3(0, 1.35, 1.8) // Adjusted closer to player face mouth
-              : new THREE.Vector3(0, 1.95, -2.45); // Adjusted for dealer mouth
+              ? new THREE.Vector3(0, 1.35, 1.8) // Near player mouth
+              : new THREE.Vector3(0, 1.95, -2.45); // Near dealer mouth
 
             const cigGroupInner = ar.activeItemAnimGroup.getObjectByName('cigGroupInner');
-            const zippoCap = ar.activeItemAnimGroup.getObjectByName('zippoCap');
             const emberTip = ar.activeItemAnimGroup.getObjectByName('emberTip');
             const cigPack = ar.activeItemAnimGroup.getObjectByName('cigPack');
 
             if (cigPack) cigPack.visible = false;
 
+            // Dynamically instantiate Zippo lighter into active item group for separate lighting action
+            let zippoGroup = ar.activeItemAnimGroup.getObjectByName('zippoGroup') as THREE.Group | undefined;
+            if (!zippoGroup) {
+              zippoGroup = createZippoMesh();
+              ar.activeItemAnimGroup.add(zippoGroup);
+            }
+
+            const zippoCap = zippoGroup.getObjectByName('zippoCap');
+            const zippoFlame = zippoGroup.getObjectByName('zippoFlame');
+
             if (elapsedSec < 1.2) {
-              // Phase 1: Bring cigarette & lighter up to lips position
+              // Phase 1: Bring cigarette up to lips, lighter hidden below
               const t = elapsedSec / 1.2;
               const easeT = 1 - Math.pow(1 - t, 3);
               const startPos = isPlayerUser ? new THREE.Vector3(0.5, 0.5, 0.8) : new THREE.Vector3(-0.6, 0.6, -1.6);
@@ -3990,12 +4453,16 @@ export function Arena3D({
                 cigGroupInner.position.y = 0.02 * (1 - easeT) - 0.12 * easeT;
               }
 
+              // Keep Zippo hidden below offscreen during initial cigarette movement
+              zippoGroup.visible = false;
+              zippoGroup.position.set(isPlayerUser ? 0.18 : -0.18, -0.6, isPlayerUser ? 0.1 : -0.1);
+
               if (!isPlayerUser) {
                 ar.dealerMouthOpenFactor = easeT * 0.4;
-                ar.dealerHeadTiltFactor = easeT * 0.5;
+                ar.dealerHeadTiltFactor = easeT * 0.4;
               }
-            } else if (elapsedSec < 2.8) {
-              // Phase 2: Zippo Lighter Spark & Flame Ignition
+            } else if (elapsedSec < 3.4) {
+              // Phase 2: Pull out Zippo lighter, flick open cap, strike flint, ignite flame, light cigarette, and lower lighter
               ar.activeItemAnimGroup.position.copy(lipsPos);
               ar.activeItemAnimGroup.rotation.set(
                 isPlayerUser ? -Math.PI / 2.2 : Math.PI / 2.2,
@@ -4009,88 +4476,157 @@ export function Arena3D({
               }
 
               if (!isPlayerUser) {
-                ar.dealerMouthOpenFactor = 0.5;
-                ar.dealerHeadTiltFactor = 0.6;
-              }
-              
-              // Flick Zippo cap open
-              if (zippoCap) {
-                zippoCap.rotation.z = -Math.PI * 0.65;
+                ar.dealerMouthOpenFactor = 0.45;
+                ar.dealerHeadTiltFactor = 0.55;
               }
 
-              if (!ar.hasLitCigarette) {
-                ar.hasLitCigarette = true;
-                import('../audio').then(a => a.playCigaretteLighting());
-                vibrateGamepad(isPlayerUser ? 'weak' : 'weak', { duration: 150, weak: 0.3, strong: 0.1 });
-              }
+              zippoGroup.visible = true;
+              const phase2T = elapsedSec - 1.2; // 0.0 to 2.2s
 
-              // Spark & flame particles at lighter tip
-              const lighterTipPos = lipsPos.clone();
-              lighterTipPos.x += (isPlayerUser ? 0.06 : -0.06);
-              lighterTipPos.y -= (isPlayerUser ? 0.04 : -0.04);
-              
-              if (Math.random() < 0.85) {
-                spawnParticles(lighterTipPos, 0xffa500, 5, 0.06, 0.002, 'SPARK');
-                if (Math.random() < 0.4) {
-                  spawnParticles(lighterTipPos, 0xff3300, 3, 0.04, 0.001, 'SPARK');
+              if (phase2T < 0.5) {
+                // Subphase A: Lighter rises up from hand height to beside cigarette tip
+                const raiseT = phase2T / 0.5;
+                const easeR = raiseT < 0.5 ? 2 * raiseT * raiseT : -1 + (4 - 2 * raiseT) * raiseT;
+                
+                const startLighterY = -0.6;
+                const targetLighterY = -0.05;
+                const lighterY = startLighterY * (1 - easeR) + targetLighterY * easeR;
+
+                zippoGroup.position.set(
+                  isPlayerUser ? 0.12 : -0.12,
+                  lighterY,
+                  isPlayerUser ? -0.1 : 0.1
+                );
+                zippoGroup.rotation.set(0, isPlayerUser ? -0.3 : 0.3, 0);
+
+                if (zippoCap) zippoCap.rotation.z = 0;
+                if (zippoFlame) zippoFlame.visible = false;
+              } else if (phase2T < 0.9) {
+                // Subphase B: Smoothly flick cap open
+                const capT = (phase2T - 0.5) / 0.4;
+                const easeC = capT < 0.5 ? 2 * capT * capT : -1 + (4 - 2 * capT) * capT;
+
+                zippoGroup.position.set(
+                  isPlayerUser ? 0.12 : -0.12,
+                  -0.05,
+                  isPlayerUser ? -0.1 : 0.1
+                );
+                if (zippoCap) {
+                  zippoCap.rotation.z = -Math.PI * 0.7 * easeC;
+                }
+                if (zippoFlame) zippoFlame.visible = false;
+              } else if (phase2T < 1.7) {
+                // Subphase C: Strike flint, ignite flame, heat tobacco tip
+                zippoGroup.position.set(
+                  isPlayerUser ? 0.12 : -0.12,
+                  -0.05,
+                  isPlayerUser ? -0.1 : 0.1
+                );
+                if (zippoCap) zippoCap.rotation.z = -Math.PI * 0.7;
+
+                if (!ar.hasLitCigarette) {
+                  ar.hasLitCigarette = true;
+                  import('../audio').then(a => a.playCigaretteLighting());
+                  vibrateGamepad(isPlayerUser ? 'weak' : 'weak', { duration: 180, weak: 0.4, strong: 0.2 });
+                }
+
+                if (zippoFlame) {
+                  zippoFlame.visible = true;
+                  const flicker = 0.85 + Math.sin(elapsedSec * 45.0) * 0.2 + Math.cos(elapsedSec * 28.0) * 0.1;
+                  zippoFlame.scale.set(flicker, flicker * (1 + Math.sin(elapsedSec * 35.0) * 0.15), flicker);
+                }
+
+                const lighterTipPos = lipsPos.clone();
+                lighterTipPos.x += (isPlayerUser ? 0.06 : -0.06);
+                lighterTipPos.y -= (isPlayerUser ? 0.04 : -0.04);
+
+                // Initial spark burst on flint wheel strike
+                if (phase2T < 1.1 && Math.random() < 0.85) {
+                  spawnParticles(lighterTipPos, 0xffaa00, 6, 0.07, 0.002, 'SPARK');
+                  spawnParticles(lighterTipPos, 0xff3300, 4, 0.05, 0.001, 'SPARK');
+                }
+
+                // Heat up cigarette ember tip as flame catches tobacco
+                if (emberTip && (emberTip as THREE.Mesh).material instanceof THREE.MeshStandardMaterial) {
+                  const heatT = (phase2T - 0.9) / 0.8;
+                  ((emberTip as THREE.Mesh).material as THREE.MeshStandardMaterial).emissiveIntensity = 2.0 + heatT * 3.5 + Math.sin(elapsedSec * 30.0) * 0.8;
+                }
+
+                // Wisps of blue-gray smoke rising from tip
+                const cigTipPos = lipsPos.clone();
+                cigTipPos.z += (isPlayerUser ? -0.15 : 0.15);
+                if (Math.random() < 0.6) {
+                  spawnParticles(cigTipPos, 0xaaaaaa, 2, 0.02, 0.001, 'SMOKE');
+                }
+              } else {
+                // Subphase D: Snap cap shut, extinguish flame, retract lighter back down
+                const retractT = (phase2T - 1.7) / 0.5;
+                const easeRetract = retractT < 0.5 ? 2 * retractT * retractT : -1 + (4 - 2 * retractT) * retractT;
+
+                if (zippoCap) zippoCap.rotation.z = 0;
+                if (zippoFlame) zippoFlame.visible = false;
+
+                const startY = -0.05;
+                const endY = -0.6;
+                zippoGroup.position.set(
+                  isPlayerUser ? 0.12 : -0.12,
+                  startY * (1 - easeRetract) + endY * easeRetract,
+                  isPlayerUser ? -0.1 : 0.1
+                );
+
+                if (retractT >= 0.95) {
+                  zippoGroup.visible = false;
                 }
               }
+            } else if (elapsedSec < 5.4) {
+              // Phase 3: Deep Inhale Drag on Cigarette
+              zippoGroup.visible = false;
 
-              // Small smoke wisps starting to curl up from cigarette tip
-              const cigTipPos = lipsPos.clone();
-              cigTipPos.z += (isPlayerUser ? -0.15 : 0.15);
-              if (Math.random() < 0.5) {
-                spawnParticles(cigTipPos, 0xaaaaaa, 2, 0.02, 0.001, 'SMOKE');
-              }
-            } else if (elapsedSec < 4.8) {
-              // Phase 3: Deep Inhale Drag - Cherry glows intensely red/orange, tobacco crackles
               ar.activeItemAnimGroup.position.copy(lipsPos);
-              
-              const dragTime = (elapsedSec - 2.8) / 2.0;
-              const cherryIntensity = Math.sin(dragTime * Math.PI) * 0.03;
+
+              const dragT = (elapsedSec - 3.4) / 2.0;
+              const cherryIntensity = Math.sin(dragT * Math.PI) * 0.035;
               ar.activeItemAnimGroup.position.z += (isPlayerUser ? -cherryIntensity : cherryIntensity);
 
               if (!isPlayerUser) {
-                ar.dealerMouthOpenFactor = 0.5 + Math.sin(dragTime * Math.PI) * 0.2;
-                ar.dealerHeadTiltFactor = 0.85;
+                ar.dealerMouthOpenFactor = 0.3 + Math.sin(dragT * Math.PI) * 0.2;
+                ar.dealerHeadTiltFactor = 0.8;
               }
 
-              // Close Zippo cap during drag
-              if (zippoCap) {
-                zippoCap.rotation.z = 0;
-              }
-
+              // Glowing cherry burning hot on deep drag
               if (emberTip && (emberTip as THREE.Mesh).material instanceof THREE.MeshStandardMaterial) {
-                ((emberTip as THREE.Mesh).material as THREE.MeshStandardMaterial).emissiveIntensity = 3.5 + Math.sin(dragTime * Math.PI * 2) * 2.0;
+                ((emberTip as THREE.Mesh).material as THREE.MeshStandardMaterial).emissiveIntensity = 4.0 + Math.sin(dragT * Math.PI) * 3.5;
               }
 
-              // Cigarette tip ember smoke & hot glow
+              // Hot ember sparks and tip smoke during deep inhalation
               const cigTipPos = lipsPos.clone();
               cigTipPos.z += (isPlayerUser ? -0.15 : 0.15);
               
-              if (Math.random() < 0.75) {
-                spawnParticles(cigTipPos, 0xff5500, 3, 0.03, 0.001, 'SPARK');
-                spawnParticles(cigTipPos, 0xcccccc, 3, 0.03, 0.002, 'SMOKE');
+              if (Math.random() < 0.8) {
+                spawnParticles(cigTipPos, 0xff4400, 3, 0.03, 0.001, 'SPARK');
+                spawnParticles(cigTipPos, 0xdddddd, 3, 0.03, 0.002, 'SMOKE');
               }
 
-              // Camera subtle tremor for deep drag
-              if (isPlayerUser && Math.random() < 0.4) {
-                camera.position.x += (Math.random() - 0.5) * 0.005;
-                camera.position.y += (Math.random() - 0.5) * 0.005;
+              // Subtle camera tremor representing deep inhalation drag
+              if (isPlayerUser && Math.random() < 0.45) {
+                camera.position.x += (Math.random() - 0.5) * 0.006;
+                camera.position.y += (Math.random() - 0.5) * 0.006;
               }
-            } else if (elapsedSec < 6.5) {
-              // Phase 4: Exhale massive realistic volumetric smoke plume!
-              const exhaleTime = (elapsedSec - 4.8) / 1.7;
+            } else if (elapsedSec < 7.2) {
+              // Phase 4: Lower Cigarette & Exhale Dense Volumetric Smoke Plume
+              zippoGroup.visible = false;
+
+              const exhaleT = (elapsedSec - 5.4) / 1.8;
               
               // Lower cigarette away from mouth
               const lowerPos = lipsPos.clone();
-              lowerPos.y -= 0.18 * exhaleTime;
-              lowerPos.x += (isPlayerUser ? 0.15 : -0.15) * exhaleTime;
+              lowerPos.y -= 0.22 * exhaleT;
+              lowerPos.x += (isPlayerUser ? 0.18 : -0.18) * exhaleT;
               ar.activeItemAnimGroup.position.copy(lowerPos);
               
               if (!isPlayerUser) {
                 ar.dealerMouthOpenFactor = 0.85;
-                ar.dealerHeadTiltFactor = 0.6;
+                ar.dealerHeadTiltFactor = 0.5;
               }
 
               if (!ar.hasExhaledSmoke) {
@@ -4103,8 +4639,8 @@ export function Arena3D({
               smokeSource.y -= 0.02;
               
               if (Math.random() < 0.95) {
-                spawnParticles(smokeSource, 0xd8d8e0, 8, 0.07, 0.003, 'SMOKE');
-                spawnParticles(smokeSource, 0x9999a8, 6, 0.09, 0.004, 'SMOKE');
+                spawnParticles(smokeSource, 0xe0e0e8, 9, 0.08, 0.0035, 'SMOKE');
+                spawnParticles(smokeSource, 0xa0a0b0, 7, 0.10, 0.0045, 'SMOKE');
               }
             } else {
               discardItemPhysics(ar.activeItemAnimGroup, ar.activeItemAnimUser || 'player');
@@ -4113,60 +4649,87 @@ export function Arena3D({
             break;
           }
           case 'SCALPEL': {
-            if (elapsedSec < 1.2) {
-              // Moves to barrel tip (0, 0.77, 0.3)
-              const t = elapsedSec / 1.2;
-              const targetP = new THREE.Vector3(0.08, 0.77, 0.3);
-              ar.activeItemAnimGroup.position.lerpVectors(
-                ar.activeItemAnimUser === 'player' ? new THREE.Vector3(0.6, 0.6, 0.8) : new THREE.Vector3(-0.8, 0.6, -1.6),
-                targetP,
-                t
+            const isPlayer = ar.activeItemAnimUser === 'player';
+            const handPos = isPlayer 
+              ? new THREE.Vector3(0.1, 1.25, 1.5) 
+              : new THREE.Vector3(-0.1, 1.55, -2.15);
+
+            if (elapsedSec < 1.0) {
+              // Phase 1: Bring scalpel up steadily to hand/gun height
+              const t = elapsedSec / 1.0;
+              const easeT = 1 - Math.pow(1 - t, 3);
+              const startPos = isPlayer ? new THREE.Vector3(0.5, 0.5, 0.8) : new THREE.Vector3(-0.6, 0.6, -1.6);
+              
+              ar.activeItemAnimGroup.position.lerpVectors(startPos, handPos, easeT);
+              ar.activeItemAnimGroup.rotation.set(
+                isPlayer ? 0.35 : -0.35,
+                isPlayer ? 0.2 : Math.PI - 0.2,
+                isPlayer ? -0.15 : 0.15
               );
-              ar.activeItemAnimGroup.rotation.set(0.42, Math.PI / 2, 0);
-            } else if (elapsedSec < 2.5) {
-              // Rapid horizontal sawing motion
-              const sawX = Math.sin(elapsedSec * 65.0) * 0.16;
-              ar.activeItemAnimGroup.position.set(sawX, 0.77, 0.3);
-              
-              // Spray massive shower of yellow metal sparks!
-              if (Math.random() < 0.85) {
-                spawnParticles(new THREE.Vector3(0, 0.76, 0.3), 0xffcc00, 8, 0.14, 0.0025, 'SPARK');
+
+              if (!isPlayer) {
+                ar.dealerHeadTiltFactor = easeT * 0.4;
               }
+            } else if (elapsedSec < 2.5) {
+              // Phase 2: Grounded, precise surgical incision slice across the shell/palm
+              const sliceT = (elapsedSec - 1.0) / 1.5; // 0.0 to 1.0 over 1.5s
               
-              // Barrel slice moment around index 1.9s
-              if (elapsedSec >= 1.9 && elapsedSec <= 1.95 && !ar.hasEjectedPliers) { // reused flag for one-time effects
+              // Smooth diagonal stroke arc
+              const strokeX = (Math.sin(sliceT * Math.PI) - 0.5) * 0.18;
+              const strokeY = Math.cos(sliceT * Math.PI) * 0.04;
+              
+              const currentCutPos = handPos.clone();
+              currentCutPos.x += isPlayer ? strokeX : -strokeX;
+              currentCutPos.y += strokeY;
+              
+              ar.activeItemAnimGroup.position.copy(currentCutPos);
+              
+              // Angle scalpel blade dynamically along the cut path
+              ar.activeItemAnimGroup.rotation.set(
+                (isPlayer ? 0.35 : -0.35) + Math.sin(sliceT * Math.PI) * 0.2,
+                isPlayer ? 0.2 : Math.PI - 0.2,
+                (isPlayer ? -0.15 : 0.15) + Math.cos(sliceT * Math.PI) * 0.3
+              );
+
+              // Sound & blood droplets at cut peak (sliceT around 0.3)
+              if (sliceT >= 0.25 && sliceT <= 0.35 && !ar.hasEjectedPliers) { // reused single-shot flag
                 ar.hasEjectedPliers = true;
-                spawnParticles(new THREE.Vector3(0, 0.76, 0.3), 0xffaa00, 25, 0.2, 0.001, 'SPARK');
+                import('../audio').then(a => a.playScalpelCut());
+                vibrateGamepad(isPlayer ? 'jolt' : 'weak', { duration: 120, weak: 0.6, strong: 0.8 });
                 
-                // Spawn the cutoff barrel piece falling down
-                const cutoffGeo = new THREE.CylinderGeometry(0.07, 0.06, 0.45, 6);
-                cutoffGeo.rotateX(Math.PI / 2);
-                const cutoffMesh = new THREE.Mesh(cutoffGeo, gunMetalMat);
-                cutoffMesh.position.set(0, 0.75, 0.55);
-                scene.add(cutoffMesh);
-                
-                // Launch cutoff physics down
-                const fallVelocity = new THREE.Vector3(
-                  (Math.random() - 0.5) * 0.04,
-                  -0.03,
-                  0.05 + Math.random() * 0.05
-                );
-                
-                activeParticles.push({
-                  mesh: cutoffMesh,
-                  velocity: fallVelocity,
-                  life: 0,
-                  maxLife: 85,
-                  gravity: 0.0035,
-                  hasLanded: false,
-                  type: 'DEBRIS',
-                  bounceCount: 0
-                });
+                if (isPlayer) {
+                  ar.cameraShakeIntensity = 0.5;
+                }
+
+                // Fine visceral blood droplets spray from incision point
+                const cutWorldPos = handPos.clone();
+                spawnParticles(cutWorldPos, 0xbd0909, 18, 0.08, -0.001, 'BLOOD');
+                spawnParticles(cutWorldPos, 0x800000, 12, 0.05, -0.0012, 'BLOOD');
+              }
+
+              // Subtle blood mist continuation during slice
+              if (sliceT > 0.3 && sliceT < 0.7 && Math.random() < 0.35) {
+                const cutWorldPos = currentCutPos.clone();
+                spawnParticles(cutWorldPos, 0xcc1111, 3, 0.03, -0.001, 'BLOOD');
+              }
+
+              if (!isPlayer) {
+                ar.dealerHeadTiltFactor = 0.6;
+              }
+            } else if (elapsedSec < 3.8) {
+              // Phase 3: Lower and discard scalpel
+              const discardT = (elapsedSec - 2.5) / 1.3;
+              const lowerPos = handPos.clone();
+              lowerPos.y -= discardT * 0.4;
+              ar.activeItemAnimGroup.position.copy(lowerPos);
+              ar.activeItemAnimGroup.rotation.x += discardT * 0.5;
+
+              if (!isPlayer) {
+                ar.dealerHeadTiltFactor = 0.6 * (1 - discardT);
               }
             } else {
               discardItemPhysics(ar.activeItemAnimGroup, ar.activeItemAnimUser || 'player');
               ar.activeItemAnimGroup = null;
-              
             }
             break;
           }
@@ -4232,6 +4795,20 @@ export function Arena3D({
             break;
           }
           case 'SYRINGE': {
+            let fluidMesh: THREE.Mesh | null = null;
+            let meniscusMesh: THREE.Mesh | null = null;
+            let bubbleMesh: THREE.Mesh | null = null;
+            let stopperMesh: THREE.Mesh | null = null;
+            let plungerMesh: THREE.Mesh | null = null;
+
+            ar.activeItemAnimGroup.traverse((child) => {
+              if (child.name === 'syringeFluid') fluidMesh = child as THREE.Mesh;
+              if (child.name === 'syringeMeniscus') meniscusMesh = child as THREE.Mesh;
+              if (child.name === 'syringeBubble') bubbleMesh = child as THREE.Mesh;
+              if (child.name === 'syringeStopper') stopperMesh = child as THREE.Mesh;
+              if (child.name === 'syringePlunger') plungerMesh = child as THREE.Mesh;
+            });
+
             if (elapsedSec < 1.0) {
               const t = elapsedSec / 1.0;
               const targetP = ar.activeItemAnimUser === 'player' ? new THREE.Vector3(0.1, 1.3, 1.9) : new THREE.Vector3(-0.15, 1.9, -2.5);
@@ -4244,7 +4821,17 @@ export function Arena3D({
 
               if (ar.activeItemAnimUser === 'dealer') {
                 ar.dealerMouthOpenFactor = t * 0.4;
-                ar.dealerHeadTiltFactor = t * -0.2; // Dealer flinches away slightly
+                ar.dealerHeadTiltFactor = t * -0.2;
+              }
+
+              // Liquid Wobble & Floating Air Bubble Physics in syringe during movement
+              if (fluidMesh && bubbleMesh && meniscusMesh) {
+                const fluidWobble = Math.sin(time * 16) * 0.02;
+                fluidMesh.scale.x = 1.0 + fluidWobble;
+                fluidMesh.scale.z = 1.0 - fluidWobble;
+                bubbleMesh.position.x = Math.sin(time * 8) * 0.012;
+                bubbleMesh.position.y = 0.28 + Math.cos(time * 10) * 0.008;
+                meniscusMesh.position.y = 0.31 + fluidWobble * 0.1;
               }
 
               if (elapsedSec >= 0.3 && !ar.hasCappedSyringe) {
@@ -4264,13 +4851,13 @@ export function Arena3D({
               }
               const currentP = targetP.clone();
               currentP.z += offsetZ;
-              currentP.x += Math.sin(time * 40) * 0.002; // intense vibrating
+              currentP.x += Math.sin(time * 40) * 0.002;
               ar.activeItemAnimGroup.position.copy(currentP);
               ar.activeItemAnimGroup.rotation.set(ar.activeItemAnimUser === 'player' ? -Math.PI / 2.5 : -Math.PI / 2.5, ar.activeItemAnimUser === 'player' ? 0 : Math.PI, 0);
 
               if (ar.activeItemAnimUser === 'dealer') {
                 ar.dealerMouthOpenFactor = 0.8;
-                ar.dealerHeadTiltFactor = 0.5; // Throws head back in pain/rush
+                ar.dealerHeadTiltFactor = 0.5;
               }
 
               if (elapsedSec >= 1.15 && !ar.hasSlammedSyringe) {
@@ -4288,25 +4875,39 @@ export function Arena3D({
 
               if (elapsedSec >= 1.25) {
                 const plungeProgress = Math.min(1.0, (elapsedSec - 1.25) / 1.0);
-                ar.activeItemAnimGroup.children.forEach(child => {
-                  if (child.position.y > 0.45 && child.position.y < 0.52) {
-                    child.position.y = 0.48 - plungeProgress * 0.065;
-                  }
-                  if (child.position.y > 0.15 && child.position.y < 0.24) {
-                    child.scale.y = 1.0 - plungeProgress;
-                    child.position.y = 0.2 - plungeProgress * 0.11;
-                  }
-                });
+                const fluidRatio = Math.max(0.001, 1.0 - plungeProgress);
 
-                if (Math.random() < 0.2) {
-                  const sprayPos = ar.activeItemAnimGroup.position.clone();
-                  spawnParticles(sprayPos, 0x00ffaa, 3, 0.03, 0.001, 'SPARK');
+                if (plungerMesh) plungerMesh.position.y = 0.48 - plungeProgress * 0.11;
+                if (stopperMesh) stopperMesh.position.y = 0.32 - plungeProgress * 0.20;
+
+                if (fluidMesh) {
+                  fluidMesh.scale.y = fluidRatio;
+                  fluidMesh.position.y = 0.09 + fluidRatio * 0.11;
+                }
+                if (meniscusMesh) {
+                  meniscusMesh.position.y = 0.09 + fluidRatio * 0.22;
+                  meniscusMesh.scale.set(fluidRatio, fluidRatio, fluidRatio);
+                }
+
+                if (bubbleMesh) {
+                  if (plungeProgress > 0.8) {
+                    bubbleMesh.visible = false;
+                  } else {
+                    const bScale = Math.max(0.001, 1.0 - plungeProgress);
+                    bubbleMesh.scale.set(bScale, bScale, bScale);
+                    bubbleMesh.position.y = 0.09 + fluidRatio * 0.20;
+                  }
+                }
+
+                if (Math.random() < 0.7) {
+                  const needleTipWorldPos = new THREE.Vector3(0, -0.10, 0).applyMatrix4(ar.activeItemAnimGroup.matrixWorld);
+                  spawnParticles(needleTipWorldPos, 0x00ffaa, 5, 0.05, 0.002, 'LIQUID');
+                  spawnParticles(needleTipWorldPos, 0x33ffbb, 2, 0.03, 0.001, 'SPARK');
                 }
               }
             } else {
               discardItemPhysics(ar.activeItemAnimGroup, ar.activeItemAnimUser || 'player');
               ar.activeItemAnimGroup = null;
-              
             }
             break;
           }
@@ -4840,31 +5441,112 @@ export function Arena3D({
 
 
       // --- CAMERA DECELERATIONS AND SHAKE KICKS ---
-      // --- DEATH ANIMATION FALLING OUT OF SEAT (ABRUPT) ---
-      if (latest.gameState === 'GAME_OVER' && latest.player.health <= 0) {
-        if (ar.deathAnimStartTime === 0) ar.deathAnimStartTime = Date.now();
+      // --- PLAYER DEATH ANIMATION: INSTANT HEAVY PHYSICS & RAGDOLL POV COLLAPSE ---
+      if (latest.player.health <= 0) {
+        if (ar.deathAnimStartTime === 0) {
+          ar.deathAnimStartTime = Date.now();
+          // Instant visceral blood spray burst right in front of POV camera
+          spawnParticles(new THREE.Vector3(camera.position.x, camera.position.y - 0.2, camera.position.z - 0.3), 0x990000, 70, 0.35, -0.003, 'BLOOD');
+          spawnParticles(new THREE.Vector3(camera.position.x + 0.1, camera.position.y - 0.1, camera.position.z - 0.4), 0xaa0000, 45, 0.28, -0.002, 'BLOOD');
+          vibrateGamepad('jolt', { duration: 300, weak: 1.0, strong: 1.0 });
+          ar.cameraShakeIntensity = 1.5;
+        }
         const rawDeath = (Date.now() - ar.deathAnimStartTime) / 1000;
-        const deathElapsed = rawDeath * 1.2;
 
-        // Abrupt violent gravity fall
-        const fallProgress = Math.min(1.0, deathElapsed / 0.16); // Ultra fast (0.16s)
-        const easeFall = fallProgress * fallProgress * fallProgress;
-        
-        camera.position.y = 3.4 - (2.8 * easeFall);
-        camera.position.z = 5.5 + (0.6 * easeFall);
-        camera.rotation.z = -1.5 * easeFall; 
-        camera.rotation.x = -0.5 * easeFall;
-        
-        ar.lookTargetY = 0.6 + (1.2 * easeFall);
+        // Smooth mouse look inertia during dying sequence - heavy sluggish neck weight
+        ar.smoothMouseX += (mouse.x - ar.smoothMouseX) * damp(0.035);
+        ar.smoothMouseY += (mouse.y - ar.smoothMouseY) * damp(0.035);
 
-        if (fallProgress >= 1.0 && !ar.hasThumpedPlayerFall) {
-          ar.hasThumpedPlayerFall = true;
-          playThumpSound();
-          vibrateGamepad('jolt');
+        const lookWeight = Math.max(0.15, 1.0 - rawDeath * 0.25);
+        const mouseLookX = ar.smoothMouseX * lookWeight;
+        const mouseLookY = ar.smoothMouseY * lookWeight;
+        
+        // Heavy 2.9s Ragdoll POV death collapse
+        if (rawDeath < 0.45) {
+          // Phase 1: Sudden Kinetic Bullet Shock - head snaps backward limply
+          const t1 = rawDeath / 0.45;
+          const ease1 = t1 * t1;
+
+          camera.position.y = 3.4 + (0.22 * Math.sin(t1 * Math.PI)) + mouseLookY * 0.12;
+          camera.position.z = 5.5 + (0.42 * ease1); // Driven backward by impact force
+          camera.position.x = mouseLookX * 0.25;
+          camera.rotation.z = -0.24 * ease1 + mouseLookX * 0.12;
+          camera.rotation.x = -0.48 * ease1 + mouseLookY * 0.12;
+          ar.lookTargetY = 0.6 + (0.60 * ease1) + mouseLookY * 0.4;
+        } else if (rawDeath < 1.30) {
+          // Phase 2: Spinal Motor Failure & Heavy Chest Slump onto Table Edge
+          const t2 = (rawDeath - 0.45) / 0.85;
+          const ease2 = Math.pow(t2, 2.5); // Exponential mass gravitational drop
+
+          const baseY = 3.4 - (2.55 * ease2); // Sags heavily down to tabletop surface (~0.85)
+          const baseZ = 5.92 - (1.28 * ease2); // Slumps forward over table
+          const baseX = 0.38 * ease2;
+
+          camera.position.y = baseY + mouseLookY * 0.15;
+          camera.position.z = baseZ;
+          camera.position.x = baseX + mouseLookX * 0.3;
+
+          camera.rotation.z = -0.24 + (0.42 * ease2) + mouseLookX * 0.15;
+          camera.rotation.x = -0.48 + (0.92 * ease2) + mouseLookY * 0.15;
+          ar.lookTargetY = 1.20 - (1.10 * ease2) + mouseLookY * 0.4;
+
+          // First Impact: Cheek/Chest slams onto hardwood table
+          if (t2 >= 0.80 && !ar.hasThumpedPlayerTable) {
+            ar.hasThumpedPlayerTable = true;
+            import('../audio').then(a => a.playThumpSound());
+            vibrateGamepad('jolt', { duration: 180, weak: 0.85, strong: 0.95 });
+            ar.cameraShakeIntensity = 0.9;
+            spawnParticles(new THREE.Vector3(0, 0.85, 4.6), 0x880000, 20, 0.10, -0.002, 'BLOOD');
+          }
+        } else if (rawDeath < 2.10) {
+          // Phase 3: Unconscious Inertia Sliding Sideways off Chair down to Floor
+          const t3 = (rawDeath - 1.30) / 0.80;
+          const ease3 = Math.pow(t3, 2.0);
+
+          const baseY = 0.85 - (0.67 * ease3); // Drops down to floor tiles level (~0.18)
+          const baseZ = 4.64 + (0.58 * ease3);
+          const baseX = 0.38 + (0.42 * ease3);
+
+          camera.position.y = baseY + mouseLookY * 0.10;
+          camera.position.z = baseZ;
+          camera.position.x = baseX + mouseLookX * 0.35;
+
+          // Camera rolls onto side lying on cheek on cold floor
+          camera.rotation.z = 0.18 - (1.68 * ease3) + mouseLookX * 0.18;
+          camera.rotation.x = 0.44 - (0.64 * ease3) + mouseLookY * 0.18;
+          ar.lookTargetY = 0.10 - (0.05 * ease3) + mouseLookY * 0.3;
+        } else if (rawDeath < 2.90) {
+          // Phase 4: Full Heavy Body Mass Floor Impact & Absorbed Rebound
+          const t4 = rawDeath - 2.10;
+
+          if (!ar.hasThumpedPlayerFall) {
+            ar.hasThumpedPlayerFall = true;
+            import('../audio').then(a => a.playThumpSound());
+            vibrateGamepad('jolt', { duration: 260, weak: 1.0, strong: 1.0 });
+            ar.cameraShakeIntensity = 1.4;
+          }
+
+          // Heavy body mass dampening rebound
+          const bounce = Math.exp(-6.5 * t4) * Math.sin(12 * t4) * 0.055;
+
+          camera.position.y = 0.18 + bounce + mouseLookY * 0.08;
+          camera.position.z = 5.22;
+          camera.position.x = 0.80 + mouseLookX * 0.35;
+
+          camera.rotation.z = -1.50 - (bounce * 0.5) + mouseLookX * 0.15;
+          camera.rotation.x = -0.20 + mouseLookY * 0.15;
+          ar.lookTargetY = 0.05 + mouseLookY * 0.25;
+        } else {
+          // Phase 5: Final Settled Resting Pose on Floor
+          camera.position.set(0.80 + mouseLookX * 0.35, 0.18 + mouseLookY * 0.08, 5.22);
+          camera.rotation.z = -1.50 + mouseLookX * 0.15;
+          camera.rotation.x = -0.20 + mouseLookY * 0.15;
+          ar.lookTargetY = 0.05 + mouseLookY * 0.25;
         }
       } else {
         ar.deathAnimStartTime = 0;
         ar.hasThumpedPlayerFall = false;
+        ar.hasThumpedPlayerTable = false;
         camera.rotation.z = 0;
         camera.rotation.x = 0;
         ar.lookTargetY = 0.6;
@@ -4874,13 +5556,31 @@ export function Arena3D({
         const shakeY = (Math.random() - 0.5) * ar.cameraShakeIntensity * 0.45;
         const shakeZ = (Math.random() - 0.5) * ar.cameraShakeIntensity * 0.25;
 
-        const handSwayX = Math.sin(time * 1.0) * 0.04;
-        const handSwayY = Math.cos(time * 0.75) * 0.03;
+        // Exponential decay of camera kickback
+        ar.cameraKickZ = (ar.cameraKickZ || 0) * Math.pow(0.83, deltaScale);
+        ar.cameraKickPitch = (ar.cameraKickPitch || 0) * Math.pow(0.81, deltaScale);
+        ar.cameraKickRoll = (ar.cameraKickRoll || 0) * Math.pow(0.82, deltaScale);
+
+        // Heavy, organic camera sway and mouse parallax when alive
+        ar.smoothMouseX += (mouse.x - ar.smoothMouseX) * damp(0.04);
+        ar.smoothMouseY += (mouse.y - ar.smoothMouseY) * damp(0.04);
+
+        const handSwayX = Math.sin(time * 0.9) * 0.035;
+        const handSwayY = Math.cos(time * 0.70) * 0.025;
+
+        // Apply position and look-target parallax for a heavy, physical camera presence
+        const parallaxX = ar.smoothMouseX * 0.38;
+        const parallaxY = ar.smoothMouseY * 0.24;
 
         camera.position.copy(stateRef.current.camPosVec);
-        camera.position.x += handSwayX + shakeX;
-        camera.position.y += handSwayY + shakeY;
-        camera.position.z += shakeZ;
+        camera.position.x += handSwayX + shakeX + parallaxX;
+        camera.position.y += handSwayY + shakeY + parallaxY;
+        camera.position.z += shakeZ + ar.cameraKickZ;
+
+        if (stateRef.current.lookTargetVec) {
+          stateRef.current.lookTargetVec.x += ar.smoothMouseX * 0.65 * damp(0.12);
+          stateRef.current.lookTargetVec.y += ar.smoothMouseY * 0.45 * damp(0.12);
+        }
       }
 
       // --- LOADING ANIMATION: CYLINDER RELOAD ---
@@ -4974,6 +5674,12 @@ export function Arena3D({
          camera.lookAt(0, 0.5, -1);
       }
 
+      // Apply rotational kickback pitch & roll to camera orientation
+      if (ar.cameraKickPitch || ar.cameraKickRoll) {
+        camera.rotation.x += ar.cameraKickPitch;
+        camera.rotation.z += ar.cameraKickRoll;
+      }
+
       if (renderPipeline) {
         renderPipeline.render();
       } else if (renderer) {
@@ -5017,6 +5723,18 @@ export function Arena3D({
       />
 
       {/* DYNAMIC HIGH-PERFORMANCE SCREENSPACE FLOATING TOOLTIP ABOVE THREE.JS OBJECTS */}
+      {/* PLAYER DEATH RED TINT & WEBGPU VISION BLUR VIGNETTE OVERLAY */}
+      <motion.div
+        className="absolute inset-0 pointer-events-none z-[118] transition-opacity duration-300"
+        style={{
+          opacity: player.health <= 0 ? 1 : 0,
+          background: 'radial-gradient(circle at center, rgba(180, 0, 0, 0.30) 0%, rgba(100, 0, 0, 0.75) 50%, rgba(15, 0, 0, 0.98) 100%)',
+          backdropFilter: player.health <= 0 ? 'blur(10px) contrast(150%) saturate(190%)' : 'none',
+          WebkitBackdropFilter: player.health <= 0 ? 'blur(10px) contrast(150%) saturate(190%)' : 'none',
+          mixBlendMode: 'hard-light'
+        }}
+      />
+
       {/* DYNAMIC SCREEN BLOOD SPLATTER OVERLAY */}
       <div className="absolute inset-0 pointer-events-none overflow-hidden z-[120]">
         {screenSplats.map(splat => (

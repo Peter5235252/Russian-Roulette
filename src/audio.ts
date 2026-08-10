@@ -324,6 +324,56 @@ export const playRazorSlice = () => {
   }
 };
 
+export const playScalpelCut = () => {
+  try {
+    const ctx = getAudioContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+
+    const bufferSize = Math.floor(ctx.sampleRate * 0.30);
+    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      data[i] = (Math.random() * 2 - 1);
+    }
+    const noise = ctx.createBufferSource();
+    noise.buffer = buffer;
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.setValueAtTime(4800, now);
+    filter.frequency.exponentialRampToValueAtTime(2200, now + 0.28);
+    filter.Q.value = 6;
+
+    const noiseGain = ctx.createGain();
+    noiseGain.gain.setValueAtTime(0, now);
+    noiseGain.gain.linearRampToValueAtTime(0.75 * globalMasterVolume, now + 0.04);
+    noiseGain.gain.exponentialRampToValueAtTime(0.01, now + 0.28);
+
+    noise.connect(filter);
+    filter.connect(noiseGain);
+    noiseGain.connect(ctx.destination);
+    noise.start(now);
+    noise.stop(now + 0.30);
+
+    const ring = ctx.createOscillator();
+    const ringGain = ctx.createGain();
+    ring.type = 'sine';
+    ring.frequency.setValueAtTime(3400, now);
+    ring.frequency.exponentialRampToValueAtTime(2800, now + 0.28);
+
+    ringGain.gain.setValueAtTime(0.3 * globalMasterVolume, now);
+    ringGain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+
+    ring.connect(ringGain);
+    ringGain.connect(ctx.destination);
+    ring.start(now);
+    ring.stop(now + 0.30);
+  } catch (e) {
+    console.warn("Scalpel cut audio failed:", e);
+  }
+};
+
 export const playCigaretteLighting = () => {
   try {
     const ctx = getAudioContext();

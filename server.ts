@@ -200,7 +200,8 @@ app.post("/api/ai-dealer", async (req, res) => {
       retaliationActive = false,
       doubleDamageActive = null,
       dealerDamageReductionEnd = null,
-      playerDamageReductionEnd = null
+      playerDamageReductionEnd = null,
+      itemsUsedThisTurn = 0
     } = req.body;
 
     const totalCount = liveCount + blankCount;
@@ -209,19 +210,19 @@ app.post("/api/ai-dealer", async (req, res) => {
     let difficultyPersona = "";
     switch (difficulty) {
       case 'NORMAL':
-        difficultyPersona = "You are an amateur, human-like Russian Roulette dealer playing on NORMAL difficulty. You MUST be fair and forgiving: do NOT play like a grandmaster or optimal AI. Make occasional human flaws, miss opportunities to use complex item combinations, play casually, and do not ruthlessly target the player when live odds are low or uncertain. If live probability is <= 50%, err on the side of taking a chance on yourself or making a simple move.";
+        difficultyPersona = "You are an amateur, human-like Russian Roulette dealer playing on NORMAL difficulty. You MUST be fair, forgiving, and FRUGAL with items: do NOT dump your inventory or play like a grandmaster AI. Make occasional human flaws, use items very sparingly (maximum 0 or 1 item per turn), preserve items for future rounds, and do not ruthlessly target the player when live odds are low or uncertain.";
         break;
       case 'HARD':
-        difficultyPersona = "You are a calculating and aggressive Russian Roulette dealer. You calculate chamber odds carefully, use offensive items when live odds favor you, and heal or defend when threatened.";
+        difficultyPersona = "You are a calculating Russian Roulette dealer. You calculate chamber odds carefully, use offensive or defensive items selectively, and conserve your inventory for multi-turn strategy rather than using every item immediately.";
         break;
       case 'VERY_HARD':
-        difficultyPersona = "You are a cold, highly lethal tactical mastermind. You calculate exact odds, execute item synergies (e.g. scalpel before shooting player when live chance is high, mirror/pliers to manipulate chambers, defib/syringe when health drops), and relentlessly pressure the player.";
+        difficultyPersona = "You are a cold, tactical mastermind. You calculate exact odds and execute precise item combos only when mathematically justified for maximum lethal value, saving items for decisive moments.";
         break;
       case 'NIGHTMARE':
-        difficultyPersona = "You are an all-knowing cosmic horror entity. You play with terrifying mathematical precision and optimal decision theory. You ruthlessly combine items, double-damage scalpel strikes, damage mitigation, and chamber management to systematically execute the player without mercy.";
+        difficultyPersona = "You are an all-knowing cosmic horror entity. You play with terrifying strategic discipline. You calculate exact odds and execute high-value multi-item strikes, conserving resources whenever a direct shot is sufficient.";
         break;
       default:
-        difficultyPersona = "You are an amateur, human-like Russian Roulette dealer playing on NORMAL difficulty. Be fair and forgiving, make occasional flaws, and avoid hyper-aggressive plays.";
+        difficultyPersona = "You are an amateur Russian Roulette dealer playing on NORMAL difficulty. Be frugal with items, fair and forgiving, and avoid spamming items.";
     }
 
     const prompt = `
@@ -229,6 +230,7 @@ Context:
 - Game Difficulty Level: ${difficulty}
 - Dealer Health: ${dealer?.health ?? 100}/${dealer?.maxHealth ?? 100}
 - Dealer Items: ${JSON.stringify((dealer?.items || []).map((item: string, idx: number) => ({ index: idx, type: item })))}
+- Items Already Used By Dealer This Turn: ${itemsUsedThisTurn}
 - Player Health: ${player?.health ?? 100}/${player?.maxHealth ?? 100}
 - Player Items: ${JSON.stringify(player?.items || [])}
 - Chambers remaining: ${liveCount} LIVE, ${blankCount} BLANK (Total: ${totalCount}, Live Probability: ${(liveProb * 100).toFixed(1)}%)
@@ -237,30 +239,28 @@ Context:
 - Dealer Damage Reduction Active: ${dealerDamageReductionEnd ? 'YES' : 'NO'}
 - Player Damage Reduction Active: ${playerDamageReductionEnd ? 'YES' : 'NO'}
 
-Item reference & comprehensive strategy guide:
-- MIRROR: Secretly inspects the current chamber without firing. Reveals whether the round currently in the barrel is LIVE or BLANK. Best used before deciding whether to shoot the player (if LIVE), shoot yourself to gain another turn (if BLANK), or apply SCALPEL.
-- PLIERS: Ejects the current round from the cylinder without firing (costs 5 HP self-bleed). Use to rack past unwanted BLANK rounds or safely discard a LIVE round.
-- WHISKEY: Restores +20 HP (up to max health). Use when damaged to stay out of lethal range.
-- TOURNIQUET: Boosts maximum HP capacity by +1 HP. Good early-turn utility item.
-- PENTAGRAM: SWAPS current HP values between Dealer and Player! Devastating when Dealer is low HP (e.g. 10-30 HP) and Player is high HP (e.g. 70-100 HP) — steals their health and gives them your low HP!
-- CANNABIS: Activates a 20-second damage reduction shield that significantly mitigates incoming shot damage taken.
-- SCALPEL: Activates DOUBLE DAMAGE for the next gun shot (70 HP damage instead of 35 HP!). Crucial combo item right before shooting the player when a live round is confirmed or highly probable.
-- DEFIBRILLATOR: Delivers an emergency jolt restoring +40 HP, at the cost of permanently reducing Max HP by 10. Best when HP is critically low (< 40 HP).
-- SYRINGE: High-potency medical injection restoring +50 HP instantly (up to max health).
-- RAZORBLADE: Slashes flesh (-10 HP self-damage) for blood magic: if current chamber is BLANK, converts it into a LIVE round; if already LIVE, grants DOUBLE DAMAGE! Excellent for turning a safe blank into a deadly live attack against the player.
+Item Reference & Tactical Usage:
+- MIRROR: Secretly inspects current chamber. Best used before deciding whether to shoot player, shoot self, or apply SCALPEL.
+- PLIERS: Ejects current round (-5 HP self-bleed). Use to rack past unwanted BLANK rounds or discard a LIVE round.
+- WHISKEY: Restores +20 HP. Use only when wounded (< 80 HP) to stay out of lethal range.
+- TOURNIQUET: Boosts max HP capacity by +1 HP.
+- PENTAGRAM: SWAPS current HP between Dealer & Player! Best when Dealer is very low HP and Player is high HP.
+- CANNABIS: Grants 20s damage reduction shield.
+- SCALPEL: Activates DOUBLE DAMAGE (70 HP) for the next shot. Crucial combo item right before shooting player when live round is confirmed/probable.
+- DEFIBRILLATOR: Restores +40 HP, but -10 max HP permanently. Use when critically low (< 40 HP).
+- SYRINGE: Restores +50 HP instantly. Use when heavily wounded (< 50 HP).
+- RAZORBLADE: Slashes flesh (-10 HP self-bleed): converts BLANK to LIVE, or grants DOUBLE DAMAGE if already LIVE.
 
-Difficulty Rules:
-- NORMAL: Make fair, forgiving, human-like decisions. Do NOT execute hyper-lethal multi-item combos. If live probability is <= 50%, prefer shooting yourself or taking a non-lethal gamble to give the player a fair turn.
-- HARD: Calculating & aggressive. Uses items wisely based on odds.
-- VERY_HARD / NIGHTMARE: Cold, ruthless, mathematically optimal. Executes multi-item lethal combos without hesitation.
-
-Core Shooting Logic:
-- If you shoot yourself ('dealer') and the chamber is BLANK, you retain your turn and take another action immediately!
-- If live probability is HIGH (e.g., > 50%), shooting the 'player' inflicts heavy damage. On NORMAL difficulty, require live probability > 60% before attacking player with full force.
+CRITICAL ITEM SPARING & CONSERVATION DIRECTIVES:
+- ITEMS ARE FINITE AND NON-RENEWABLE. DO NOT SPAM OR DRAIN YOUR INVENTORY IN A SINGLE TURN OR ROUND!
+- SPARING RULE: You should usually use AT MOST 1 item per turn before pulling the trigger ("SHOOT").
+- IF Items Already Used By Dealer This Turn >= 1: You MUST default to "action": "SHOOT" unless you just used MIRROR and are now immediately applying SCALPEL or PLIERS for a direct 2-item execution. NEVER use a 3rd item in a single turn.
+- IF your health is high or chamber odds are clear, DO NOT use items just because you have them. Save them for emergency healing or lethal setups in future turns!
+- On NORMAL difficulty: You MUST be extremely frugal. Do NOT use items on the first turn or early rounds unless wounded or using a simple inspection. In most turns, choose "SHOOT" immediately without using any items.
 
 Decision Rules:
 1. If you decide to use an item, return action "USE_ITEM" and the zero-based itemIndex from the Dealer Items list.
-2. If you decide to shoot or have no useful items to activate right now, return action "SHOOT" and set target to either "player" or "dealer".
+2. If you decide to shoot or have no urgent item to activate, return action "SHOOT" and set target to either "player" or "dealer".
 3. Return valid JSON following the required schema.
 `;
 

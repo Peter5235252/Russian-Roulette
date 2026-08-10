@@ -75,6 +75,7 @@ export const useGameState = () => {
 
   const stateRef = useRef<CoreState>(state);
   stateRef.current = state;
+  const dealerItemsUsedThisTurnRef = useRef(0);
   
   const updateState = useCallback((patch: Partial<CoreState>) => {
     stateRef.current = { ...stateRef.current, ...patch, turnSequence: stateRef.current.turnSequence + 1 };
@@ -87,6 +88,7 @@ export const useGameState = () => {
   const wait = (ms: number) => new Promise(res => setTimeout(res, ms));
 
   const startRound = async (initialLoading = false) => {
+    dealerItemsUsedThisTurnRef.current = 0;
     updateState({ gameState: 'LOADING' });
     const live = Math.floor(Math.random() * 5) + 1; // 1 to 5 live rounds
     const newChambers = generateChambers(live);
@@ -177,6 +179,7 @@ export const useGameState = () => {
   };
 
   const passTurn = (currentTurn: 'player' | 'dealer') => {
+    dealerItemsUsedThisTurnRef.current = 0;
     if (currentTurn === 'player') {
       updateState({ gameState: 'DEALER_TURN', message: "The Dealer's turn." });
     } else {
@@ -208,7 +211,7 @@ export const useGameState = () => {
       subMessage: "..."
     });
     
-    await wait(1200);
+    await wait(1500);
     const updatedState = stateRef.current; // get latest state after wait
 
     if (chamber.isLive) {
@@ -312,6 +315,7 @@ export const useGameState = () => {
     if (user === 'player') {
       updateState({ player: { ...s.player, items: newItems } });
     } else {
+       dealerItemsUsedThisTurnRef.current += 1;
        updateState({ dealer: { ...s.dealer, items: newItems } });
     }
 
@@ -375,14 +379,15 @@ export const useGameState = () => {
       case 'CIGARETTE':
          const reductionEnd = Date.now() + 20000;
          if (user === 'player') {
-             updateState({ playerDamageReductionEnd: reductionEnd, subMessage: "You flick the Zippo & drag deep. Nerves steady as smoke fills your lungs." });
+             updateState({ playerDamageReductionEnd: reductionEnd, subMessage: "You flick the Zippo and drag deep. Nerves steady as smoke fills your lungs." });
          } else {
              updateState({ dealerDamageReductionEnd: reductionEnd, subMessage: "The Dealer lights a cigarette & exhales a thick drag." });
          }
-         waitTime = 5500;
+         waitTime = 7200;
          break;
       case 'SCALPEL':
          updateState({ doubleDamageActive: user, subMessage: "Damage doubled for the next shot." });
+         waitTime = 3800;
          break;
       case 'DEFIBRILLATOR':
          if (user === 'player') {
@@ -492,7 +497,8 @@ export const useGameState = () => {
               retaliationActive: currentRef.retaliationActive,
               doubleDamageActive: currentRef.doubleDamageActive,
               dealerDamageReductionEnd: currentRef.dealerDamageReductionEnd,
-              playerDamageReductionEnd: currentRef.playerDamageReductionEnd
+              playerDamageReductionEnd: currentRef.playerDamageReductionEnd,
+              itemsUsedThisTurn: dealerItemsUsedThisTurnRef.current
             }),
             signal: controller.signal
           });
@@ -540,48 +546,53 @@ export const useGameState = () => {
            personality = 'ARROGANT';
         }
 
-        // Dynamic, intelligent AI item use logic
+        // Dynamic, intelligent AI item use logic - CONSERVE ITEMS STRATEGICALLY
         let selectedItemIndex = -1;
-        
-        // Randomize the order we check items to prevent always using items in the exact same priority order
-        const itemIndices = myItems.map((_, i) => i).sort(() => Math.random() - 0.5);
+        const itemsUsedCount = dealerItemsUsedThisTurnRef.current;
+        const difficultyLevel = currentRef.difficulty || 'NORMAL';
 
-        for (const i of itemIndices) {
-           const item = myItems[i];
-           let wantToUse = false;
-           
-           if (item === 'SYRINGE' && currentRef.dealer.health <= currentRef.dealer.maxHealth - (personality === 'DESPERATE' ? 20 : 50)) {
-               wantToUse = true;
-           } else if (item === 'WHISKEY' && currentRef.dealer.health <= currentRef.dealer.maxHealth - (personality === 'DESPERATE' ? 10 : 20)) {
-               wantToUse = true;
-           } else if (item === 'DEFIBRILLATOR' && currentRef.dealer.health <= currentRef.dealer.maxHealth - (personality === 'DESPERATE' ? 15 : 40) && currentRef.dealer.health < 60) {
-               wantToUse = true;
-           } else if (item === 'PENTAGRAM') {
-               const diff = currentRef.player.health - currentRef.dealer.health;
-               if (diff >= (personality === 'DESPERATE' ? 10 : 40) && currentRef.dealer.health < 90) {
-                   wantToUse = true;
-               }
-           } else if (item === 'CIGARETTE' && !currentRef.dealerDamageReductionEnd) {
-               if (currentRef.dealer.health < 70 || liveChance > (personality === 'DESPERATE' ? 0.4 : 0.6)) wantToUse = true;
-           } else if (item === 'SCALPEL' && !currentRef.doubleDamageActive) {
-               if (liveChance > (personality === 'ARROGANT' ? 0.3 : 0.65)) wantToUse = true; // Arrogant uses scalpel loosely
-           } else if (item === 'MIRROR') {
-               if (lCount > 0 && bCount > 0) wantToUse = true; 
-           } else if (item === 'PLIERS') {
-               if (liveChance < (personality === 'ARROGANT' ? 0.6 : 0.4)) wantToUse = true; // Arrogant ejects more freely
-           } else if (item === 'TOURNIQUET') {
-               if (currentRef.dealer.health < (personality === 'DESPERATE' ? 70 : 50)) wantToUse = true;
-           } else if (item === 'RAZORBLADE') {
-               if (currentRef.dealer.health >= 40 && liveChance > (personality === 'ARROGANT' ? 0.3 : 0.5)) wantToUse = true;
-           }
-           
-           // If we found a valid tactical item, we use it occasionally instead of spamming all instantly
-           // Arrogant uses items less frequently, Desperate spams them
-           const useChance = personality === 'DESPERATE' ? 0.1 : (personality === 'ARROGANT' ? 0.6 : 0.3);
-           if (wantToUse && Math.random() > useChance) {
-               selectedItemIndex = i;
-               break; 
-           }
+        // Enforce strict parsimony: if 1+ items used this turn or on NORMAL difficulty, avoid spamming items
+        const skipItemChance = itemsUsedCount >= 1 ? 0.95 : (difficultyLevel === 'NORMAL' ? 0.70 : 0.35);
+        const shouldAttemptItem = Math.random() >= skipItemChance;
+
+        if (shouldAttemptItem) {
+          // Randomize the order we check items to prevent always using items in the exact same priority order
+          const itemIndices = myItems.map((_, i) => i).sort(() => Math.random() - 0.5);
+
+          for (const i of itemIndices) {
+             const item = myItems[i];
+             let wantToUse = false;
+             
+             if (item === 'SYRINGE' && currentRef.dealer.health <= currentRef.dealer.maxHealth - 50) {
+                 wantToUse = true;
+             } else if (item === 'WHISKEY' && currentRef.dealer.health <= currentRef.dealer.maxHealth - 25) {
+                 wantToUse = true;
+             } else if (item === 'DEFIBRILLATOR' && currentRef.dealer.health <= 40) {
+                 wantToUse = true;
+             } else if (item === 'PENTAGRAM') {
+                 const diff = currentRef.player.health - currentRef.dealer.health;
+                 if (diff >= 40 && currentRef.dealer.health <= 40) {
+                     wantToUse = true;
+                 }
+             } else if (item === 'CIGARETTE' && !currentRef.dealerDamageReductionEnd) {
+                 if (currentRef.dealer.health < 60) wantToUse = true;
+             } else if (item === 'SCALPEL' && !currentRef.doubleDamageActive) {
+                 if (liveChance >= 0.65) wantToUse = true;
+             } else if (item === 'MIRROR') {
+                 if (lCount > 0 && bCount > 0 && Math.random() > 0.4) wantToUse = true; 
+             } else if (item === 'PLIERS') {
+                 if (liveChance < 0.35 && bCount > 0) wantToUse = true;
+             } else if (item === 'TOURNIQUET') {
+                 if (currentRef.dealer.health < 50) wantToUse = true;
+             } else if (item === 'RAZORBLADE') {
+                 if (currentRef.dealer.health >= 50 && liveChance >= 0.5) wantToUse = true;
+             }
+             
+             if (wantToUse) {
+                 selectedItemIndex = i;
+                 break; 
+             }
+          }
         }
 
         if (selectedItemIndex !== -1) {
