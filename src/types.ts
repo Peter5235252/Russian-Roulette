@@ -12,7 +12,7 @@ export type GameState =
   | 'ROUND_OVER'
   | 'GAME_OVER';
 
-export type ItemType = 'MIRROR' | 'PLIERS' | 'WHISKEY' | 'TOURNIQUET' | 'PENTAGRAM' | 'CIGARETTE' | 'SCALPEL' | 'DEFIBRILLATOR' | 'SYRINGE' | 'RAZORBLADE';
+export type ItemType = 'MIRROR' | 'PLIERS' | 'WHISKEY' | 'TOURNIQUET' | 'PENTAGRAM' | 'CIGARETTE' | 'SCALPEL' | 'DEFIBRILLATOR' | 'SYRINGE' | 'RAZORBLADE' | 'MEDKIT';
 
 export interface Chamber {
   isLive: boolean;

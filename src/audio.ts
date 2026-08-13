@@ -1,4 +1,4 @@
-import { vibrateGamepad } from './controller';
+import { vibrateGamepad, getControllerSettings } from './controller';
 
 const SOUND_URLS = {
   cock: 'https://cdn.freesound.org/previews/402/402790_7111288-hq.mp3',
@@ -113,6 +113,8 @@ export const playPurchaseSound = () => {
 };
 
 export const playBloodSplatter = () => {
+  const s = getControllerSettings();
+  if (s.bloodEffectsEnabled === false) return;
   playSound('splatter', true, 0.9);
 };
 
@@ -623,3 +625,61 @@ export const playThumpSound = () => {
 };
 
 
+
+export const playGlassBreakSound = () => {
+  try {
+    const ctx = getAudioContext();
+    if (ctx.state === 'suspended') ctx.resume();
+
+    // High frequency noise burst for the glass shattering
+    const bufferSize = ctx.sampleRate * 0.4;
+    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    
+    for (let i = 0; i < bufferSize; i++) {
+      // Create noisy, jagged wave representing glass shards
+      data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (ctx.sampleRate * 0.1));
+    }
+
+    const noiseSource = ctx.createBufferSource();
+    noiseSource.buffer = buffer;
+    
+    const bandpass = ctx.createBiquadFilter();
+    bandpass.type = 'bandpass';
+    bandpass.frequency.value = 6000;
+    bandpass.Q.value = 0.5;
+
+    const highpass = ctx.createBiquadFilter();
+    highpass.type = 'highpass';
+    highpass.frequency.value = 3000;
+    
+    const gainNode = ctx.createGain();
+    gainNode.gain.setValueAtTime(1.5 * globalMasterVolume, ctx.currentTime);
+    gainNode.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.35);
+
+    noiseSource.connect(bandpass);
+    bandpass.connect(highpass);
+    highpass.connect(gainNode);
+    gainNode.connect(ctx.destination);
+
+    // Also add a low thump for the bottle body hitting the ground
+    const osc = ctx.createOscillator();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(150, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(30, ctx.currentTime + 0.1);
+    
+    const thumpGain = ctx.createGain();
+    thumpGain.gain.setValueAtTime(0.8 * globalMasterVolume, ctx.currentTime);
+    thumpGain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.15);
+    
+    osc.connect(thumpGain);
+    thumpGain.connect(ctx.destination);
+    
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime + 0.2);
+
+    noiseSource.start(ctx.currentTime);
+  } catch (e) {
+    console.error('Failed to play glass break sound', e);
+  }
+};

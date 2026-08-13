@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { GameState, Chamber, PlayerState, ItemType, Difficulty } from '../types';
-import { DEADLY_QUOTES, BLUFF_QUOTES, BLUFF_QUOTES_FAILED } from '../gameData';
-import { playStartAudio, startAmbientDrone, playGunshot, playEmptyClick, playItemSound, playBloodSplatter, playBulletLoad, playTapSound } from '../audio';
+import { DEADLY_QUOTES, getRandomItemsByDifficulty, getItemPrice } from '../gameData';
+import { playStartAudio, startAmbientDrone, playGunshot, playEmptyClick, playItemSound, playBloodSplatter } from '../audio';
 import { vibrateGamepad, getControllerSettings } from '../controller';
 
 const INITIAL_HEALTH = 100;
@@ -21,18 +21,6 @@ const generateChambers = (numLive: number): Chamber[] => {
   return chambers;
 };
 
-const getRandomItems = (count: number): ItemType[] => {
-  const items: ItemType[] = ['MIRROR', 'PLIERS', 'WHISKEY', 'TOURNIQUET', 'PENTAGRAM', 'CIGARETTE', 'SCALPEL', 'DEFIBRILLATOR'];
-  const result: ItemType[] = [];
-  for (let i = 0; i < count; i++) {
-    if (Math.random() < 0.12) { // 12% chance for rare
-      result.push(Math.random() < 0.5 ? 'SYRINGE' : 'RAZORBLADE');
-    } else {
-      result.push(items[Math.floor(Math.random() * items.length)]);
-    }
-  }
-  return result;
-};
 
 interface CoreState {
   gameState: GameState;
@@ -51,11 +39,8 @@ interface CoreState {
   bloodCurrency: number;
   doubleDamageActive: 'player' | 'dealer' | null;
   roundsSurvived: number;
-  loadingPhase: 'pickup' | 'spin';
-  bulletsInserted: number;
-  bulletTargetCount: number;
-  bluffCharges: number;
-  bluffActiveTurns: number;
+  shooter: 'player' | 'dealer' | null;
+  target: 'player' | 'dealer' | null;
 }
 
 export const useGameState = () => {
@@ -66,7 +51,7 @@ export const useGameState = () => {
     currentChamberIndex: 0,
     player: { health: INITIAL_HEALTH, maxHealth: INITIAL_HEALTH, items: [] },
     dealer: { health: INITIAL_HEALTH, maxHealth: INITIAL_HEALTH, items: [] },
-    message: 'Load the chambers.',
+    message: 'Load the cylinder.',
     subMessage: '',
     bloodLevel: 0,
     turnSequence: 0,
@@ -76,11 +61,8 @@ export const useGameState = () => {
     bloodCurrency: 0,
     doubleDamageActive: null,
     roundsSurvived: 0,
-    loadingPhase: 'pickup',
-    bulletsInserted: 0,
-    bulletTargetCount: 1,
-    bluffCharges: 1,
-    bluffActiveTurns: 0
+    shooter: null,
+    target: null
   });
 
   const stateRef = useRef<CoreState>(state);
@@ -107,100 +89,28 @@ export const useGameState = () => {
       chambers: newChambers,
       currentChamberIndex: 0,
       retaliationActive: false,
-      loadingPhase: 'pickup',
-      bulletsInserted: 0,
-      bulletTargetCount: live,
-      bluffCharges: 1,
-      message: "The rounds wait on the table. Take them one by one.",
-      subMessage: `${live} LIVE. ${CYLINDER_SIZE - live} BLANK. Drag the rounds into the cylinder.`
+      message: "Loading the cylinder...",
+      subMessage: `${live} live rounds, ${CYLINDER_SIZE - live} blanks.`,
+      shooter: null,
+      target: null
     });
     
     if (!initialLoading) {
        // give items
+       const diff = stateRef.current.difficulty;
        const p = stateRef.current.player;
        const d = stateRef.current.dealer;
        updateState({
-         player: { ...p, items: [...p.items, ...getRandomItems(2)].slice(0, 8) },
-         dealer: { ...d, items: [...d.items, ...getRandomItems(2)].slice(0, 8) }
+         player: { ...p, items: [...p.items, ...getRandomItemsByDifficulty(2, diff, 'player')].slice(0, 8) },
+         dealer: { ...d, items: [...d.items, ...getRandomItemsByDifficulty(2, diff, 'dealer')].slice(0, 8) }
        });
     }
 
-    // NOTE: The game intentionally STAYS in LOADING until the player has
-    // physically loaded each round and spun the cylinder (or used QUICK LOAD).
-    // The 3D arena drives this flow via registerBulletInserted + completeLoading.
-  };
-
-  const registerBulletInserted = () => {
-    const s = stateRef.current;
-    if (s.gameState !== 'LOADING' || s.loadingPhase !== 'pickup') return;
-    playBulletLoad();
-    const next = s.bulletsInserted + 1;
-    if (next >= s.bulletTargetCount) {
-      updateState({
-        bulletsInserted: next,
-        loadingPhase: 'spin',
-        message: "The cylinder is full. Spin it — fate decides.",
-        subMessage: "Click and drag across the cylinder to spin it."
-      });
-      vibrateGamepad('jolt', { duration: 60, weak: 0.15, strong: 0.9 });
-    } else {
-      updateState({
-        bulletsInserted: next,
-        subMessage: `${next}/${s.bulletTargetCount} rounds seated. ${s.bulletTargetCount - next} left on the block.`
-      });
-    }
-  };
-
-  const completeLoading = (finalIndex: number) => {
-    const s = stateRef.current;
-    if (s.gameState !== 'LOADING') return;
-    const clamped = Math.max(0, Math.min(CYLINDER_SIZE - 1, Math.round(finalIndex) || 0));
+    await wait(1500);
     updateState({
-      currentChamberIndex: clamped,
-      loadingPhase: 'spin',
-      bulletsInserted: s.bulletTargetCount,
       message: DEADLY_QUOTES[Math.floor(Math.random() * DEADLY_QUOTES.length)],
       subMessage: "Your turn.",
       gameState: 'PLAYER_TURN'
-    });
-  };
-
-  const autoLoad = () => {
-    const s = stateRef.current;
-    if (s.gameState !== 'LOADING') return;
-    playBulletLoad();
-    const idx = Math.floor(Math.random() * CYLINDER_SIZE);
-    updateState({
-      currentChamberIndex: idx,
-      loadingPhase: 'spin',
-      bulletsInserted: s.bulletTargetCount,
-      message: DEADLY_QUOTES[Math.floor(Math.random() * DEADLY_QUOTES.length)],
-      subMessage: "Your turn.",
-      gameState: 'PLAYER_TURN'
-    });
-  };
-
-  const bluff = () => {
-    const s = stateRef.current;
-    if (s.gameState !== 'PLAYER_TURN' || s.bluffCharges <= 0) return;
-
-    // Landing chances per difficulty: rattling a cold killer is hard.
-    const landChance: Record<Difficulty, number> = {
-      NORMAL: 0.8,
-      HARD: 0.6,
-      VERY_HARD: 0.4,
-      NIGHTMARE: 0.22,
-    };
-    const landed = Math.random() < (landChance[s.difficulty] ?? 0.6);
-
-    playTapSound();
-    updateState({
-      bluffCharges: s.bluffCharges - 1,
-      bluffActiveTurns: landed ? 2 : 0,
-      message: "BLUFF.",
-      subMessage: landed
-        ? BLUFF_QUOTES[Math.floor(Math.random() * BLUFF_QUOTES.length)] + " His composure cracks — he misreads the odds for two turns."
-        : BLUFF_QUOTES_FAILED[Math.floor(Math.random() * BLUFF_QUOTES_FAILED.length)]
     });
   };
 
@@ -219,14 +129,24 @@ export const useGameState = () => {
     // Auto-detect if we are advancing to next round from a win (where dealer was defeated but player survived)
     // to safeguard gamepad inputs or simple clicks from losing their shop items or previous inventory.
     const isNextRound = nextRound || (stateRef.current.gameState === 'GAME_OVER' && stateRef.current.player.health > 0);
-    const currentItems = isNextRound ? stateRef.current.player.items : getRandomItems(pItems);
+    const currentItems = isNextRound 
+      ? stateRef.current.player.items 
+      : getRandomItemsByDifficulty(pItems, difficulty, 'player');
 
     updateState({
       difficulty,
       player: { health: pHealth, maxHealth: pHealth, items: currentItems },
-      dealer: { health: dHealth, maxHealth: dHealth, items: getRandomItems(dItems) },
+      dealer: { health: dHealth, maxHealth: dHealth, items: getRandomItemsByDifficulty(dItems, difficulty, 'dealer') },
       bloodLevel: 0,
-      roundsSurvived: isNextRound ? stateRef.current.roundsSurvived : 0
+      roundsSurvived: isNextRound ? stateRef.current.roundsSurvived : 0,
+      bloodCurrency: isNextRound ? stateRef.current.bloodCurrency : 0,
+      turnSequence: 0,
+      doubleDamageActive: null,
+      retaliationActive: false,
+      playerDamageReductionEnd: null,
+      dealerDamageReductionEnd: null,
+      shooter: null,
+      target: null
     });
     await startRound(true);
   };
@@ -238,7 +158,7 @@ export const useGameState = () => {
       updateState({
         gameState: 'GAME_OVER',
         roundsSurvived: isPlayerWin ? s.roundsSurvived + 1 : s.roundsSurvived,
-        message: s.player.health <= 0 ? "" : "THE DEALER HAS BEEN BANISHED. For now.",
+        message: s.player.health <= 0 ? "" : "The Dealer has been banished.",
         subMessage: ""
       });
       return true;
@@ -247,8 +167,8 @@ export const useGameState = () => {
     if (s.chambers.every(c => c.isSpent)) {
       updateState({
         gameState: 'ROUND_OVER',
-        message: "Click. Empty.",
-        subMessage: "All chambers spent. Loading the next cylinder."
+        message: "Empty.",
+        subMessage: "All chambers spent. Loading next round."
       });
       await wait(1200);
       await startRound();
@@ -273,37 +193,36 @@ export const useGameState = () => {
   };
 
   const fireGun = async (target: 'player' | 'dealer', shooter: 'player' | 'dealer') => {
-    updateState({ gameState: 'SHOOTING' });
+    updateState({ 
+      gameState: 'SHOOTING',
+      shooter,
+      target
+    });
     const s = stateRef.current;
     const chamber = s.chambers[s.currentChamberIndex];
-    
-    // Mark spent
-    const newChambers = [...s.chambers];
-    newChambers[s.currentChamberIndex] = { ...chamber, isSpent: true };
-    updateState({ chambers: newChambers });
 
     if (shooter === 'dealer') {
       updateState({ retaliationActive: false });
     }
 
-    let targetName = target === 'player' ? 'You' : 'The Dealer';
-    if (shooter === target) {
-      targetName = shooter === 'player' ? 'yourself' : 'himself';
-    }
-
     updateState({
-      message: `${shooter === 'player' ? 'You' : 'The Dealer'} pulled the trigger on ${targetName}.`,
-      subMessage: "..."
+      message: "",
+      subMessage: ""
     });
     
     await wait(1500);
-    const updatedState = stateRef.current; // get latest state after wait
+
+    // Mark spent after the trigger pull delay when the round is actually fired
+    const updatedState = stateRef.current;
+    const newChambers = [...updatedState.chambers];
+    newChambers[updatedState.currentChamberIndex] = { ...chamber, isSpent: true };
+    updateState({ chambers: newChambers });
 
     if (chamber.isLive) {
       playGunshot();
       vibrateGamepad(target === 'player' ? 'strong' : 'burst');
       setTimeout(playBloodSplatter, 150);
-      updateState({ message: "BANG!", bloodLevel: 100 });
+      updateState({ message: "", bloodLevel: 100 });
       
       let damage = target === shooter ? (DAMAGE_PER_SHOT * 2) : DAMAGE_PER_SHOT; // Severe consequence for shooting self
       
@@ -315,10 +234,8 @@ export const useGameState = () => {
       let damageReduction = 0;
       if (target === 'player' && updatedState.playerDamageReductionEnd && Date.now() < updatedState.playerDamageReductionEnd) {
           damageReduction = 30;
-          updateState({ subMessage: "But the nicotine dulls the pain." });
       } else if (target === 'dealer' && updatedState.dealerDamageReductionEnd && Date.now() < updatedState.dealerDamageReductionEnd) {
           damageReduction = 30;
-          updateState({ subMessage: "Nicotine numbs the dealer's impact." });
       }
       
       damage = Math.max(0, damage - damageReduction);
@@ -334,14 +251,6 @@ export const useGameState = () => {
         });
       }
       
-      if (target === shooter) {
-          updateState({ subMessage: damageReduction > 0 ? "A fatal error in judgement, but the nicotine dulls the pain." : "A fatal error in judgement. Double damage taken." });
-      } else if (damageReduction > 0) {
-          // Handled above conceptually if we want, but let's keep it simple
-      } else {
-          updateState({ subMessage: "Blood spills onto the table." });
-      }
-
       setTimeout(() => updateState({ bloodLevel: 0 }), 500);
       
       const isDeadlyToPlayer = target === 'player' && updatedState.player.health <= 0;
@@ -356,16 +265,13 @@ export const useGameState = () => {
       vibrateGamepad('weak');
 
       if (shooter === 'player' && target === 'dealer') {
-        const isDesperate = stateRef.current.dealer.health / stateRef.current.dealer.maxHealth <= 0.35;
         updateState({
           retaliationActive: true,
-          message: "Click.",
-          subMessage: isDesperate 
-             ? "Chamber was empty. The Dealer tilts his head. He remembers this insult."
-             : "Chamber was empty. The Dealer's grin stretches. He remembers this insult."
+          message: "",
+          subMessage: ""
         });
       } else {
-        updateState({ message: "Click.", subMessage: "Chamber was empty." });
+        updateState({ message: "", subMessage: "" });
       }
 
       await wait(1000);
@@ -377,7 +283,7 @@ export const useGameState = () => {
         updateState({
           gameState: shooter === 'player' ? 'PLAYER_TURN' : 'DEALER_TURN',
           message: `${shooter === 'player' ? 'You' : 'The Dealer'} go again.`,
-          subMessage: "Fortune favors the bold."
+          subMessage: "Shoot."
         });
       } else {
         passTurn(shooter);
@@ -419,9 +325,9 @@ export const useGameState = () => {
     switch (item) {
       case 'MIRROR':
         if (user === 'player') {
-            updateState({ subMessage: chamber.isLive ? "You see a LIVE round." : "You see an EMPTY chamber." });
+            updateState({ subMessage: chamber.isLive ? "You see a live round inside." : "You see an empty chamber." });
         } else {
-            updateState({ subMessage: "The Dealer inspects the chamber..." });
+            updateState({ subMessage: "The Dealer inspects the chamber." });
         }
         break;
       case 'PLIERS':
@@ -429,7 +335,7 @@ export const useGameState = () => {
         newChambers[s2.currentChamberIndex] = { ...chamber, isSpent: true };
         updateState({ chambers: newChambers });
         advanceChamber();
-        updateState({ subMessage: `Shell ejected. It was ${chamber.isLive ? 'LIVE' : 'BLANK'}.` });
+        updateState({ subMessage: `Shell ejected. It was a ${chamber.isLive ? 'live round' : 'blank'}.` });
         
         // Bleed a bit
         if (user === 'player') {
@@ -464,14 +370,14 @@ export const useGameState = () => {
       case 'CIGARETTE':
          const reductionEnd = Date.now() + 20000;
          if (user === 'player') {
-             updateState({ playerDamageReductionEnd: reductionEnd, subMessage: "You flick the Zippo and drag deep. Nerves steady as smoke fills your lungs." });
+             updateState({ playerDamageReductionEnd: reductionEnd, subMessage: "You light a cigarette. Nerves steady as smoke fills your lungs." });
          } else {
-             updateState({ dealerDamageReductionEnd: reductionEnd, subMessage: "The Dealer lights a cigarette & exhales a thick drag." });
+             updateState({ dealerDamageReductionEnd: reductionEnd, subMessage: "The Dealer lights a cigarette and inhales a deep drag." });
          }
-         waitTime = 7200;
+         waitTime = 3200;
          break;
       case 'SCALPEL':
-         updateState({ doubleDamageActive: user, subMessage: "Damage doubled for the next shot." });
+         updateState({ doubleDamageActive: user, subMessage: "The barrel is sawn off. Double damage next shot." });
          waitTime = 3800;
          break;
       case 'DEFIBRILLATOR':
@@ -480,7 +386,15 @@ export const useGameState = () => {
          } else {
              updateState({ dealer: { ...s2.dealer, health: Math.min(s2.dealer.maxHealth - 10, s2.dealer.health + 40), maxHealth: Math.max(10, s2.dealer.maxHealth - 10) } });
          }
-         updateState({ subMessage: "A violent jolt. 40 HP restored, but max vitality permanently reduced." });
+         updateState({ subMessage: "A violent jolt. Vitality restored, but max health is permanently reduced." });
+         break;
+      case 'MEDKIT':
+         if (user === 'player') {
+             updateState({ player: { ...s2.player, health: s2.player.maxHealth } });
+         } else {
+             updateState({ dealer: { ...s2.dealer, health: s2.dealer.maxHealth } });
+         }
+         updateState({ subMessage: "Critical wounds patched. Fully restored." });
          break;
       case 'SYRINGE':
          if (user === 'player') {
@@ -488,7 +402,7 @@ export const useGameState = () => {
          } else {
              updateState({ dealer: { ...s2.dealer, health: Math.min(s2.dealer.maxHealth, s2.dealer.health + 50) } });
          }
-         updateState({ subMessage: "Instant surge. 50 HP restored to vitality." });
+         updateState({ subMessage: "Instant surge. 50 HP restored." });
          break;
       case 'RAZORBLADE':
          let newHealth = user === 'player' ? s2.player.health - 10 : s2.dealer.health - 10;
@@ -496,10 +410,10 @@ export const useGameState = () => {
          
          if (user === 'player') {
              // 180 bloodLevel to trigger both max opacity flash and the shake.
-             updateState({ player: { ...s2.player, health: newHealth }, bloodLevel: 180, subMessage: "Slashing flesh..." });
+             updateState({ player: { ...s2.player, health: newHealth }, bloodLevel: 180, subMessage: "Slashing flesh with the razorblade..." });
              vibrateGamepad('jolt', { duration: 400 });
          } else {
-             updateState({ dealer: { ...s2.dealer, health: newHealth }, subMessage: "Slashing flesh..." });
+             updateState({ dealer: { ...s2.dealer, health: newHealth }, subMessage: "Slashing flesh with the razorblade..." });
          }
          
          const bladeChambers = [...s2.chambers];
@@ -513,10 +427,10 @@ export const useGameState = () => {
          await wait(1000);
          
          if (rChamber.isLive) {
-             updateState({ doubleDamageActive: user, subMessage: "Flesh torn. The chamber was already live. Damage doubled!" });
+             updateState({ doubleDamageActive: user, subMessage: "The chamber was already live. Double damage active." });
          } else {
              bladeChambers[s2.currentChamberIndex] = { ...rChamber, isLive: true };
-             updateState({ chambers: bladeChambers, subMessage: "Flesh torn. Blood magicaly converts the blank into a LIVE round!" });
+             updateState({ chambers: bladeChambers, subMessage: "Blood seals the blank. It's now a live round." });
          }
          setTimeout(() => updateState({ bloodLevel: 0 }), 1500);
          break;
@@ -559,14 +473,14 @@ export const useGameState = () => {
         const bCount = currentRef.chambers.filter(c => !c.isLive && !c.isSpent).length;
 
         // Display thinking subtitle in HUD
-        updateState({ message: "The Dealer is thinking on what to do..." });
-
-        const rattled = currentRef.bluffActiveTurns > 0;
+        updateState({ message: "The Dealer is thinking..." });
 
         // --- MULTI-PROVIDER AI DEALER INTEGRATION ---
         try {
+          const activeDifficulty = currentRef.difficulty || 'NORMAL';
+          const timeoutMs = activeDifficulty === 'NIGHTMARE' ? 20000 : activeDifficulty === 'VERY_HARD' ? 15000 : activeDifficulty === 'HARD' ? 10000 : 5000;
           const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 4000); // 4 sec timeout
+          const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
           const aiSettings = getControllerSettings();
 
           const apiRes = await fetch('/api/ai-dealer', {
@@ -576,7 +490,7 @@ export const useGameState = () => {
               provider: aiSettings.aiProvider || 'gemini',
               apiKey: aiSettings.aiApiKey || '',
               customModel: aiSettings.aiCustomModel || '',
-              difficulty: currentRef.difficulty || 'NORMAL',
+              difficulty: activeDifficulty,
               dealer: currentRef.dealer,
               player: currentRef.player,
               liveCount: lCount,
@@ -585,8 +499,7 @@ export const useGameState = () => {
               doubleDamageActive: currentRef.doubleDamageActive,
               dealerDamageReductionEnd: currentRef.dealerDamageReductionEnd,
               playerDamageReductionEnd: currentRef.playerDamageReductionEnd,
-              itemsUsedThisTurn: dealerItemsUsedThisTurnRef.current,
-              bluffActive: rattled
+              itemsUsedThisTurn: dealerItemsUsedThisTurnRef.current
             }),
             signal: controller.signal
           });
@@ -598,13 +511,11 @@ export const useGameState = () => {
               if (decision.action === 'USE_ITEM' && typeof decision.itemIndex === 'number' && decision.itemIndex >= 0 && decision.itemIndex < myItems.length) {
                 console.log(`[AI Dealer (${aiSettings.aiProvider || 'gemini'})]`, decision.reasoning);
                 aiRef.current = false;
-                if (rattled) updateState({ bluffActiveTurns: Math.max(0, currentRef.bluffActiveTurns - 1) });
                 useItem(decision.itemIndex, 'dealer');
                 return;
               } else if (decision.action === 'SHOOT' && (decision.target === 'player' || decision.target === 'dealer')) {
                 console.log(`[AI Dealer (${aiSettings.aiProvider || 'gemini'})]`, decision.reasoning);
                 aiRef.current = false;
-                if (rattled) updateState({ bluffActiveTurns: Math.max(0, currentRef.bluffActiveTurns - 1) });
                 fireGun(decision.target, 'dealer');
                 return;
               }
@@ -617,12 +528,6 @@ export const useGameState = () => {
         // --- FALLBACK HEURISTIC DEALER LOGIC ---
         const totalCount = lCount + bCount;
         let liveChance = totalCount > 0 ? lCount / totalCount : 0.5;
-
-        // Psychology: a rattled dealer misjudges the odds. He reads ±25% noise
-        // into the true live probability and gets reckless under pressure.
-        if (rattled) {
-          liveChance = Math.max(0, Math.min(1, liveChance + (Math.random() - 0.5) * 0.5));
-        }
 
         // On NORMAL difficulty, tone down aggressive shooting odds to make fallback fair
         if ((currentRef.difficulty || 'NORMAL') === 'NORMAL') {
@@ -659,7 +564,9 @@ export const useGameState = () => {
              const item = myItems[i];
              let wantToUse = false;
              
-             if (item === 'SYRINGE' && currentRef.dealer.health <= currentRef.dealer.maxHealth - 50) {
+             if (item === 'MEDKIT' && currentRef.dealer.health <= currentRef.dealer.maxHealth - 40) {
+                 wantToUse = true;
+             } else if (item === 'SYRINGE' && currentRef.dealer.health <= currentRef.dealer.maxHealth - 50) {
                  wantToUse = true;
              } else if (item === 'WHISKEY' && currentRef.dealer.health <= currentRef.dealer.maxHealth - 25) {
                  wantToUse = true;
@@ -691,12 +598,6 @@ export const useGameState = () => {
           }
         }
 
-        // A rattled dealer fumbles: 30% chance he ignores the item he should have
-        // used and acts on raw nerve instead.
-        if (selectedItemIndex !== -1 && rattled && Math.random() < 0.3) {
-           selectedItemIndex = -1;
-        }
-
         if (selectedItemIndex !== -1) {
              aiRef.current = false;
              useItem(selectedItemIndex, 'dealer'); // sets state to ITEM_USE, breaking this cycle
@@ -725,13 +626,6 @@ export const useGameState = () => {
             shootPlayerChance += 0.25; // Desperate shoots player almost always to avoid self damage
         }
 
-        // Bluffed: rattled nerve makes him gamble on himself — he swings the
-        // barrel at his own head more often to "prove" nothing scares him.
-        if (rattled) {
-            shootPlayerChance -= 0.18;
-            if (lCount > 0 && bCount > 0 && shootPlayerChance < 0.3) shootPlayerChance = 0.3;
-        }
-
         let shootTarget: 'player' | 'dealer' = Math.random() < Math.max(0.0, Math.min(1.0, shootPlayerChance)) ? 'player' : 'dealer';
         
         // Never shoot self if health is critical and it's a guess (Unless they are arrogant, maybe they risk it? No, keep the core logic)
@@ -740,7 +634,6 @@ export const useGameState = () => {
         }
 
         aiRef.current = false;
-        if (rattled) updateState({ bluffActiveTurns: Math.max(0, currentRef.bluffActiveTurns - 1) });
         // Use fireGun internally, which handles the next state changes
         fireGun(shootTarget, 'dealer');
       };
@@ -766,10 +659,6 @@ export const useGameState = () => {
     startGame,
     fireGun,
     useItem,
-    buyItem,
-    bluff,
-    registerBulletInserted,
-    completeLoading,
-    autoLoad
+    buyItem
   };
 };

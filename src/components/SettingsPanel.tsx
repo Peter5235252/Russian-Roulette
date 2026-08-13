@@ -218,7 +218,7 @@ export function SettingsPanel({ difficulty = 'NORMAL', onClose }: SettingsPanelP
         animate={{ scale: 1, opacity: 1, y: 0 }}
         exit={{ scale: 0.96, opacity: 0, y: 10 }}
         transition={{ type: 'spring', damping: 28, stiffness: 350 }}
-        className="border-2 border-red-950 frosted-glass-ui flex flex-col w-full max-w-4xl max-h-[85vh] h-auto shadow-[0_0_60px_rgba(0,0,0,0.95)] rounded-none overflow-hidden text-neutral-200"
+        className="border-2 border-red-950 bg-[#0a050d]/92 flex flex-col w-full max-w-4xl max-h-[85vh] h-auto shadow-[0_0_60px_rgba(0,0,0,0.95)] rounded-none overflow-hidden text-neutral-200"
       >
         {/* Modal Header */}
         <div className="flex items-center justify-between px-5 sm:px-6 py-3.5 sm:py-4 border-b-2 border-red-950 bg-neutral-950/80 shrink-0">
@@ -374,10 +374,10 @@ export function SettingsPanel({ difficulty = 'NORMAL', onClose }: SettingsPanelP
                 />
 
                 <CustomSelect
-                  label="Particle FX Density"
+                  label="Particle FX Density (Sparks & Smoke)"
                   options={[
-                    { value: "off", label: "Off", description: "0% Particle Generation" },
-                    { value: "low", label: "Low", description: "25% Sparks & Blood Density" },
+                    { value: "off", label: "Off", description: "Disabled non-blood particles (Sparks, Smoke, Debris)" },
+                    { value: "low", label: "Low", description: "25% Sparks & Smoke Density" },
                     { value: "medium", label: "Medium", description: "50% Sparks & Smoke" },
                     { value: "high", label: "High", description: "100% Default Particle FX" },
                     { value: "ultra", label: "Ultra", description: "175% Dense Volumetric Particles" }
@@ -688,7 +688,7 @@ export function SettingsPanel({ difficulty = 'NORMAL', onClose }: SettingsPanelP
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-neutral-300">
                   <div className="p-2.5 rounded-none bg-neutral-900 border border-neutral-800 flex justify-between items-center">
                     <span>Shoot Self</span>
-                    <span className="bg-red-950 text-red-400 px-2 py-0.5 rounded-none font-bold border border-red-800">S / ←</span>
+                    <span className="bg-blue-950 text-blue-400 px-2 py-0.5 rounded-none font-bold border border-blue-800">S / ←</span>
                   </div>
                   <div className="p-2.5 rounded-none bg-neutral-900 border border-neutral-800 flex justify-between items-center">
                     <span>Shoot Dealer</span>
@@ -701,22 +701,6 @@ export function SettingsPanel({ difficulty = 'NORMAL', onClose }: SettingsPanelP
                   <div className="p-2.5 rounded-none bg-neutral-900 border border-neutral-800 flex justify-between items-center">
                     <span>Use Item (Slots 1-8)</span>
                     <span className="bg-neutral-800 px-2 py-0.5 rounded-none text-amber-400 font-bold border border-amber-800/80">1 - 8</span>
-                  </div>
-                  <div className="p-2.5 rounded-none bg-neutral-900 border border-neutral-800 flex justify-between items-center">
-                    <span>Bluff / Taunt the Dealer</span>
-                    <span className="bg-neutral-800 px-2 py-0.5 rounded-none text-fuchsia-400 font-bold border border-fuchsia-800/80">F</span>
-                  </div>
-                  <div className="p-2.5 rounded-none bg-neutral-900 border border-neutral-800 flex justify-between items-center">
-                    <span>Load Round into Cylinder</span>
-                    <span className="bg-neutral-800 px-2 py-0.5 rounded-none text-emerald-400 font-bold border border-emerald-800/80">CLICK + DRAG</span>
-                  </div>
-                  <div className="p-2.5 rounded-none bg-neutral-900 border border-neutral-800 flex justify-between items-center">
-                    <span>Spin Cylinder</span>
-                    <span className="bg-neutral-800 px-2 py-0.5 rounded-none text-emerald-400 font-bold border border-emerald-800/80">CLICK + DRAG</span>
-                  </div>
-                  <div className="p-2.5 rounded-none bg-neutral-900 border border-neutral-800 flex justify-between items-center">
-                    <span>Quick Load / Auto Load</span>
-                    <span className="bg-neutral-800 px-2 py-0.5 rounded-none text-amber-400 font-bold border border-amber-800/80">SPACE / ENTER</span>
                   </div>
                   <div className="p-2.5 rounded-none bg-neutral-900 border border-neutral-800 flex justify-between items-center">
                     <span>Market / Shop View</span>

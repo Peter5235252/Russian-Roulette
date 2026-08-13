@@ -20,7 +20,8 @@ const ITEM_ICONS: Record<ItemType, string> = {
   SCALPEL: '🔪',
   DEFIBRILLATOR: '⚡',
   SYRINGE: '💉',
-  RAZORBLADE: '🪒'
+  RAZORBLADE: '🪒',
+  MEDKIT: '🚑'
 };
 
 export function ItemRack({ items, onUseItem, disabled, selectedIndex = -1, highlightSelected = false }: ItemRackProps) {

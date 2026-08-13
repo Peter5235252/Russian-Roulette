@@ -9,7 +9,8 @@ import { useGameState } from "./hooks/useGameState";
 import { playHeartbeat, setHeartbeatStatus, playTapSound } from "./audio";
 import { CustomSelect, SelectOption } from "./components/CustomSelect";
 import { Difficulty } from "./types";
-import { Menu } from "lucide-react";
+import { Menu, AlertTriangle } from "lucide-react";
+import { getControllerSettings } from "./controller";
 
 export const getDifficultyConfig = (diff: Difficulty) => {
   switch (diff) {
@@ -21,7 +22,7 @@ export const getDifficultyConfig = (diff: Difficulty) => {
         bgColor: 'bg-emerald-950/40 hover:bg-emerald-900/50',
         glowShadow: 'shadow-[0_0_20px_rgba(16,185,129,0.35)]',
         badgeBg: 'bg-emerald-950/90 text-emerald-400 border-emerald-700/80',
-        desc: '100 HP | 3 Starting Items | Dealer: 100 HP, 3 Items',
+        desc: '100 HP | 3 Starting Items | Full Cylinder Load HUD | Dealer: 100 HP, 3 Items',
         intensity: 'NORMAL — INTENDED BASELINE',
       };
     case 'HARD':
@@ -32,7 +33,7 @@ export const getDifficultyConfig = (diff: Difficulty) => {
         bgColor: 'bg-amber-950/40 hover:bg-amber-900/50',
         glowShadow: 'shadow-[0_0_20px_rgba(245,158,11,0.35)]',
         badgeBg: 'bg-amber-950/90 text-amber-400 border-amber-700/80',
-        desc: '75 HP | 2 Starting Items | Dealer: 125 HP, 4 Items',
+        desc: '75 HP | 2 Starting Items | Blind Chamber HUD (Shot Count Only) | Dealer: 125 HP, 4 Items',
         intensity: 'HARD — TIGHT MARGIN FOR ERROR',
       };
     case 'VERY_HARD':
@@ -43,7 +44,7 @@ export const getDifficultyConfig = (diff: Difficulty) => {
         bgColor: 'bg-red-950/50 hover:bg-red-900/60',
         glowShadow: 'shadow-[0_0_25px_rgba(239,68,68,0.45)]',
         badgeBg: 'bg-red-950/90 text-red-400 border-red-700/80',
-        desc: '50 HP | 1 Starting Item | Dealer: 150 HP, 5 Items',
+        desc: '50 HP | 1 Starting Item | Total Blackout (No HUD) | Dealer: 150 HP, 5 Items',
         intensity: 'VERY HARD — UNFORGIVING PUNISHMENT',
       };
     case 'NIGHTMARE':
@@ -54,15 +55,31 @@ export const getDifficultyConfig = (diff: Difficulty) => {
         bgColor: 'bg-gradient-to-r from-purple-950/80 via-fuchsia-950/70 to-purple-950/80 hover:from-purple-900/90 hover:to-fuchsia-900/90',
         glowShadow: 'shadow-[0_0_30px_rgba(217,70,239,0.6)]',
         badgeBg: 'bg-fuchsia-950/90 text-fuchsia-300 border-fuchsia-600/80',
-        desc: '30 HP | 0 Starting Items | Dealer: 200 HP, 6 Items',
+        desc: '30 HP | 0 Starting Items | Liar\'s Chamber (Deceptive HUD) | Dealer: 200 HP, 6 Items',
         intensity: 'NIGHTMARE — PURE AGONY',
       };
+  }
+};
+
+export const getLowHealthThreshold = (diff: Difficulty): number => {
+  switch (diff) {
+    case 'NORMAL':
+      return 35; // 35 or less is critical (under one standard shot of 35 damage)
+    case 'HARD':
+      return 25; // 25 or less is critical
+    case 'VERY_HARD':
+      return 20; // 20 or less is critical
+    case 'NIGHTMARE':
+      return 10; // 10 or less is critical (when starting with 30 max health)
+    default:
+      return 30;
   }
 };
 
 export default function App() {
   const {
     gameState,
+    difficulty: gameDifficulty,
     chambers,
     currentChamberIndex,
     player,
@@ -76,19 +93,12 @@ export default function App() {
     bloodCurrency,
     doubleDamageActive,
     roundsSurvived,
+    shooter,
+    target,
     buyItem,
     startGame,
     fireGun,
     useItem,
-    loadingPhase,
-    bulletsInserted,
-    bulletTargetCount,
-    bluffCharges,
-    bluffActiveTurns,
-    bluff,
-    registerBulletInserted,
-    completeLoading,
-    autoLoad,
   } = useGameState();
 
   const [showDeathScreen, setShowDeathScreen] = useState(false);
@@ -101,14 +111,33 @@ export default function App() {
 
   const diffConfig = getDifficultyConfig(difficulty);
 
+  const activeDifficulty = gameDifficulty || difficulty;
+  const unspentChambers = chambers ? chambers.filter((c) => !c.isSpent) : [];
+  const unspentTotal = unspentChambers.length;
+  const activeLiveCount = unspentChambers.filter((c) => c.isLive).length;
+  const activeBlankCount = unspentChambers.filter((c) => !c.isLive).length;
+
+  // Liar's Chamber deceptive calculations for NIGHTMARE difficulty
+  let nightmareLiveCount = 0;
+  let nightmareBlankCount = 0;
+  if (activeDifficulty === "NIGHTMARE" && unspentTotal > 0) {
+    if (activeLiveCount === activeBlankCount) {
+      nightmareLiveCount = Math.min(unspentTotal, activeLiveCount + 1);
+    } else {
+      nightmareLiveCount = activeBlankCount;
+    }
+    nightmareBlankCount = Math.max(0, unspentTotal - nightmareLiveCount);
+  }
+
   useEffect(() => {
     import("./controller").then(
       ({ getControllerSettings, subscribeControllerSettings }) => {
-        setInputType(getControllerSettings().inputType || "kbm");
-        setBloodEffectsEnabled(getControllerSettings().bloodEffectsEnabled !== false);
-        subscribeControllerSettings((s) => {
-          setInputType(s.inputType);
-          setBloodEffectsEnabled(s.bloodEffectsEnabled !== false);
+        const s = getControllerSettings();
+        setInputType(s.inputType || "kbm");
+        setBloodEffectsEnabled(s.bloodEffectsEnabled !== false);
+        subscribeControllerSettings((updated) => {
+          setInputType(updated.inputType);
+          setBloodEffectsEnabled(updated.bloodEffectsEnabled !== false);
         });
       },
     );
@@ -117,7 +146,6 @@ export default function App() {
   const isPlayerTurn = gameState === "PLAYER_TURN";
   const showControls = isPlayerTurn;
   const isActionInProgress = gameState === "SHOOTING" || gameState === "ITEM_USE" || gameState === "LOADING" || gameState === "DEALER_TURN";
-  const isDealerRattled = bluffActiveTurns > 0;
 
   useEffect(() => {
     if (selectedItemIndex >= player.items.length) {
@@ -138,9 +166,11 @@ export default function App() {
 
   useEffect(() => {
     const isCritical =
-      player.health > 0 && player.health <= 40 && gameState !== "GAME_OVER";
+      player.health > 0 &&
+      player.health <= getLowHealthThreshold(activeDifficulty) &&
+      gameState !== "GAME_OVER";
     setHeartbeatStatus(isCritical);
-  }, [player.health, gameState]);
+  }, [player.health, gameState, activeDifficulty]);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -186,20 +216,6 @@ export default function App() {
         if (player.health <= 0 && gameState !== "MENU") return;
         if (isActionInProgress) return;
         setIsSettingsOpen((p) => !p);
-        return;
-      }
-
-      // BLUFF: psych-out the Dealer during your turn.
-      if (isPlayerTurn && (e.key === "f" || e.key === "F") && bluffCharges > 0) {
-        e.preventDefault();
-        bluff();
-        return;
-      }
-
-      // During interactive loading: Space / Enter / L = QUICK LOAD.
-      if (gameState === "LOADING" && (e.key === " " || e.code === "Space" || e.key === "Enter" || e.key === "l" || e.key === "L")) {
-        e.preventDefault();
-        autoLoad();
         return;
       }
 
@@ -274,8 +290,6 @@ export default function App() {
                   ".btn-rusty",
                 ) as HTMLButtonElement;
                 if (returnBtn) returnBtn.click();
-              } else if (gameState === "LOADING") {
-                autoLoad();
               } else if (
                 gameState === "MENU" ||
                 gameState === "ROUND_OVER" ||
@@ -342,13 +356,13 @@ export default function App() {
     <div className={`min-h-screen w-full relative flex flex-col crt ${bloodLevel > 150 ? 'shake-intense' : ''}`}>
       <CustomCursor />
       {/* Blood Overlay */}
-      {bloodLevel > 0 && (
+      {bloodLevel > 0 && bloodEffectsEnabled && (
         <div
           className={`absolute inset-0 pointer-events-none z-50 ${bloodLevel > 150 ? 'duration-75 scale-105' : 'duration-300'} transition-all`}
           style={{
-            backgroundColor: bloodLevel > 150 ? "darkred" : "var(--color-blood)",
-            opacity: bloodLevel > 150 ? 0.9 : bloodLevel / 200, // almost completely red out screen on brutal damage
-            mixBlendMode: "multiply",
+            backgroundColor: bloodLevel > 150 ? "rgba(42, 0, 0, 0.95)" : "var(--color-blood)",
+            opacity: bloodLevel > 150 ? 0.9 : Math.min(0.8, bloodLevel / 200),
+            mixBlendMode: "multiply"
           }}
         />
       )}
@@ -363,7 +377,7 @@ export default function App() {
         }}
       />
       {player.health > 0 &&
-        player.health <= 40 &&
+        player.health <= getLowHealthThreshold(activeDifficulty) &&
         gameState !== "GAME_OVER" && (
           <div className="absolute inset-0 z-40 heartbeat-overlay mix-blend-multiply pointer-events-none" />
         )}
@@ -440,7 +454,7 @@ export default function App() {
           </div>
           <button
             onClick={() => startGame(difficulty)}
-            className="btn-rusty px-12 py-4 text-xl font-bold tracking-[0.3em] flex items-center justify-center gap-4"
+            className="btn-rusty px-12 py-4 text-xl font-bold tracking-[0.3em] flex items-center justify-center gap-4 cursor-pointer"
           >
             {inputType === "gamepad" && (
               <span className="gamepad-indicator-btn-a gp-size-large shadow-[0_0_12px_rgba(34,197,94,0.6)]">
@@ -449,6 +463,34 @@ export default function App() {
             )}
             ENTER THE CHAMBER
           </button>
+
+          <div className="absolute bottom-6 right-6 lg:bottom-10 lg:right-10 max-w-[300px] sm:max-w-[360px] w-full border border-red-800/50 bg-black/90 p-5 text-left shadow-[0_0_25px_rgba(185,28,28,0.25)] backdrop-blur-md overflow-hidden group rounded-sm">
+            {/* Warning tape style top border accent */}
+            <div className="absolute top-0 left-0 w-full h-[3px] bg-gradient-to-r from-red-900 via-red-600 to-red-900 opacity-80"></div>
+            
+            <div className="flex items-center justify-between mb-3 border-b border-red-900/40 pb-2">
+              <div className="flex items-center gap-2.5">
+                <AlertTriangle className="text-red-500" size={18} />
+                <h2 className="text-red-500 font-mono text-[11px] font-extrabold tracking-[0.25em] uppercase">Content Warning</h2>
+              </div>
+              <span className="px-2 py-0.5 bg-red-600 text-black font-mono font-black text-[10px] tracking-wider rounded">18+ ONLY</span>
+            </div>
+            
+            <p className="text-red-400/90 font-mono text-[10px] leading-[1.6] uppercase tracking-wider font-bold mb-3">
+              THIS EXPERIENCE IS STRICTLY 18+ AND NOT RECOMMENDED FOR ANYONE UNDER 18 OR THOSE SENSITIVE TO GRAPHIC GORE OR THE THEMES IN THE GAME.
+            </p>
+
+            <ul className="my-3 space-y-1.5 text-[10px] font-mono text-neutral-400 tracking-widest uppercase">
+              <li className="flex items-center gap-2"><span className="text-red-600 font-bold text-sm leading-none">•</span> Extreme blood, splatter & graphic gore</li>
+              <li className="flex items-center gap-2"><span className="text-red-600 font-bold text-sm leading-none">•</span> Self-mutilation (razorblades)</li>
+              <li className="flex items-center gap-2"><span className="text-red-600 font-bold text-sm leading-none">•</span> Russian roulette & firearm violence</li>
+              <li className="flex items-center gap-2"><span className="text-red-600 font-bold text-sm leading-none">•</span> Substance use & occult horror themes</li>
+            </ul>
+            
+            <p className="text-neutral-500 font-mono text-[9px] leading-[1.5] uppercase tracking-widest border-t border-red-900/30 pt-2.5">
+              BY ENTERING, YOU CONFIRM YOU ARE AT LEAST 18 YEARS OF AGE AND ACKNOWLEDGE THESE MATURE WARNINGS.
+            </p>
+          </div>
         </div>
       ) : (
         // --- 3D MODE IMMERSIVE FULL-SCREEN VISUAL LAYOUT ---
@@ -474,20 +516,15 @@ export default function App() {
               buyItem={buyItem}
               playerDamageReductionEnd={playerDamageReductionEnd}
               dealerDamageReductionEnd={dealerDamageReductionEnd}
-              loadingPhase={loadingPhase}
-              bulletsInserted={bulletsInserted}
-              bulletTargetCount={bulletTargetCount}
-              bluffActiveTurns={bluffActiveTurns}
-              onBulletInserted={registerBulletInserted}
-              onSpinComplete={completeLoading}
-              onAutoLoad={autoLoad}
+              difficulty={activeDifficulty}
+              shooter={shooter}
+              target={target}
             />
           </div>
 
           {/* Immersive high-contrast floating overlay HUD */}
           <div className="fixed inset-0 flex flex-col justify-between p-8 z-10 pointer-events-none select-none">
-            
-            {(player.health > 0 || gameState === "MENU") && !isActionInProgress && (
+                  {(player.health > 0 || gameState === "MENU") && !isActionInProgress && (
               <button
                  onClick={() => {
                    if ((player.health > 0 || gameState === "MENU") && !isActionInProgress) {
@@ -504,6 +541,85 @@ export default function App() {
                  )}
                  <span>SETTINGS</span>
               </button>
+            )}
+
+            {/* Difficulty-Scaled Cylinder Load Overlay HUD */}
+            {gameState !== "MENU" && unspentTotal > 0 && (
+              <>
+                {/* 1. NORMAL MODE: Full Physical Shell Count */}
+                {activeDifficulty === "NORMAL" && (
+                  <div className="pointer-events-auto absolute bottom-6 left-6 sm:bottom-8 sm:left-8 z-40 flex flex-col gap-1.5 frosted-glass-ui backdrop-blur-md px-3.5 py-2.5 border border-neutral-800/90 border-l-2 border-l-red-600/90 select-none font-mono text-[10px] min-w-[170px] shadow-[0_8px_32px_rgba(0,0,0,0.85)] animate-fade-in">
+                    <div className="flex items-center justify-between gap-3 text-neutral-400 font-extrabold uppercase tracking-widest text-[9px] border-b border-neutral-800/80 pb-1">
+                      <span>CYLINDER LOAD</span>
+                      <span className="text-neutral-500 font-mono font-semibold">{unspentTotal} TOTAL</span>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-3 pt-0.5">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-neutral-400 font-bold text-[9px]">LIVE:</span>
+                        <span className="text-red-500 font-extrabold text-sm tabular-nums">
+                          {activeLiveCount}
+                        </span>
+                      </div>
+
+                      <span className="text-neutral-700 font-light">|</span>
+
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-neutral-400 font-bold text-[9px]">BLANK:</span>
+                        <span className="text-neutral-200 font-extrabold text-sm tabular-nums">
+                          {activeBlankCount}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* 2. HARD MODE: "The Blind Chamber" (Remaining Shots Only) */}
+                {activeDifficulty === "HARD" && (
+                  <div className="pointer-events-auto absolute bottom-6 left-6 sm:bottom-8 sm:left-8 z-40 flex flex-col gap-1 frosted-glass-ui backdrop-blur-md px-3.5 py-2 border border-neutral-800/90 border-l-2 border-l-amber-600/90 select-none font-mono text-[10px] min-w-[160px] shadow-[0_8px_32px_rgba(0,0,0,0.85)] animate-fade-in">
+                    <div className="flex items-center justify-between gap-3 text-neutral-400 font-extrabold uppercase tracking-widest text-[9px] border-b border-neutral-800/80 pb-1">
+                      <span>CYLINDER LOAD</span>
+                      <span className="text-amber-500/80 text-[8px] font-bold tracking-wider">BLIND</span>
+                    </div>
+
+                    <div className="flex items-center justify-center pt-1 pb-0.5">
+                      <span className="text-neutral-200 font-extrabold text-xs sm:text-sm tracking-widest uppercase">
+                        {unspentTotal} REMAINING
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {/* 3. VERY_HARD MODE: "Total Blackout" -> No box rendered */}
+
+                {/* 4. NIGHTMARE MODE: "Liar's Chamber" (Deceptive Lies in Normal GUI Design) */}
+                {activeDifficulty === "NIGHTMARE" && (
+                  <div className="pointer-events-auto absolute bottom-6 left-6 sm:bottom-8 sm:left-8 z-40 flex flex-col gap-1.5 frosted-glass-ui backdrop-blur-md px-3.5 py-2.5 border border-neutral-800/90 border-l-2 border-l-red-600/90 select-none font-mono text-[10px] min-w-[170px] shadow-[0_8px_32px_rgba(0,0,0,0.85)] animate-fade-in">
+                    <div className="flex items-center justify-between gap-3 text-neutral-400 font-extrabold uppercase tracking-widest text-[9px] border-b border-neutral-800/80 pb-1">
+                      <span>CYLINDER LOAD</span>
+                      <span className="text-neutral-500 font-mono font-semibold">{unspentTotal} TOTAL</span>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-3 pt-0.5">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-neutral-400 font-bold text-[9px]">LIVE:</span>
+                        <span className="text-red-500 font-extrabold text-sm tabular-nums">
+                          {nightmareLiveCount}
+                        </span>
+                      </div>
+
+                      <span className="text-neutral-700 font-light">|</span>
+
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-neutral-400 font-bold text-[9px]">BLANK:</span>
+                        <span className="text-neutral-200 font-extrabold text-sm tabular-nums">
+                          {nightmareBlankCount}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </>
             )}
 
             {isPlayerTurn && inputType === "gamepad" && (
@@ -531,7 +647,7 @@ export default function App() {
                   <span className="gamepad-indicator-cap uppercase text-[8px] px-1 py-0.5">
                     LT
                   </span>{" "}
-                  <span className="opacity-80 text-red-400">SHOOT SELF</span>
+                  <span className="opacity-80 text-blue-400 font-bold">SHOOT SELF</span>
                 </span>
                 <span className="opacity-20 text-neutral-600">|</span>
                 <span className="flex items-center gap-1.5">
@@ -548,37 +664,13 @@ export default function App() {
             {/* Top Row: Dealer Hand info */}
             <div className="flex justify-between items-start w-full mt-4 sm:mt-0">
               <div className="flex items-center gap-3 pointer-events-auto">
-                {isPlayerTurn && (
-                  <>
-                    <button
-                      onClick={() => bluff()}
-                      disabled={bluffCharges <= 0}
-                      className={`pointer-events-auto min-h-[38px] px-4 py-2 rounded-none border font-mono text-[11px] font-bold uppercase tracking-widest transition-all cursor-pointer flex items-center gap-2 ${
-                        bluffCharges > 0
-                          ? isDealerRattled
-                            ? "bg-fuchsia-950/80 border-fuchsia-600 text-fuchsia-200 shadow-[0_0_18px_rgba(217,70,239,0.35)]"
-                            : "bg-red-950/80 border-red-700 text-red-200 hover:bg-red-900/90 hover:border-red-500"
-                          : "bg-neutral-900/70 border-neutral-800 text-neutral-600 cursor-not-allowed"
-                      }`}
-                    >
-                      <span className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />
-                      <span>BLUFF ({bluffCharges})</span>
-                      <span className="text-[9px] text-neutral-500 font-normal hidden sm:inline">[F]</span>
-                    </button>
-                    {isDealerRattled && (
-                      <span className="px-3 py-1.5 rounded-none border border-fuchsia-800/70 bg-fuchsia-950/60 text-fuchsia-300 font-mono text-[10px] font-bold uppercase tracking-widest animate-pulse">
-                        DEALER RATTLED ({bluffActiveTurns})
-                      </span>
-                    )}
-                  </>
-                )}
               </div>
               <div className="text-[10px] font-mono text-neutral-300 frosted-glass-ui backdrop-blur-md px-3 py-1.5 select-none font-bold">
                 DEALER HAND: {dealer.items.length}/8
               </div>
             </div>
 
-            {/* Bottom Section: Dialogue text and Health/Inventory displays packaged together at the bottom */}
+            {/* Bottom Section: Health/Inventory displays packaged together at the bottom */}
             <div className="flex flex-col gap-3 w-full mt-auto">
               {/* Bottom Row: Player Health & Help guides */}
               <div className="flex justify-between items-end w-full">
@@ -591,60 +683,22 @@ export default function App() {
                   </span>
                 </div>
               </div>
-
-              {/* Interactive Loading Instructions + Quick Load */}
-      {gameState === "LOADING" && (
-        <div className="fixed inset-x-0 bottom-24 sm:bottom-28 z-20 flex flex-col items-center gap-2.5 pointer-events-none">
-          <div className="frosted-glass-ui px-5 py-3 border border-red-950/70 text-center max-w-xl animate-fade-in">
-            {loadingPhase === "pickup" ? (
-              <>
-                <div className="font-mono text-xs sm:text-sm font-bold uppercase tracking-[0.2em] text-red-300">
-                  LOAD THE CYLINDER — ROUND BY ROUND
-                </div>
-                <div className="mt-1 font-mono text-[10px] sm:text-[11px] text-neutral-300 tracking-wide">
-                  CLICK A ROUND ON THE WOODEN BLOCK AND DRAG IT INTO AN OPEN CHAMBER
-                  <span className="mx-2 text-red-500/80">•</span>
-                  <span className="text-amber-300 font-bold">{bulletsInserted}/{bulletTargetCount} SEATED</span>
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="font-mono text-xs sm:text-sm font-bold uppercase tracking-[0.2em] text-red-300">
-                  SPIN THE CYLINDER
-                </div>
-                <div className="mt-1 font-mono text-[10px] sm:text-[11px] text-neutral-300 tracking-wide">
-                  CLICK ON THE CYLINDER AND DRAG ACROSS IT. LET IT RATCHET TO A STOP.
-                </div>
-              </>
-            )}
-          </div>
-          <button
-            onClick={() => autoLoad()}
-            className="pointer-events-auto min-h-[36px] px-4 py-1.5 rounded-none border border-neutral-700 bg-neutral-900/80 hover:border-red-600 hover:text-red-300 text-neutral-400 font-mono text-[10px] font-bold uppercase tracking-widest transition-all cursor-pointer"
-            title="Skip manual loading"
-          >
-            QUICK LOAD [SPACE]
-          </button>
-        </div>
-      )}
-
-      {/* Dialogue Box: Pure floating text centered at the absolute bottom, no container box, borderless and unobstructed */}
-              {((gameState !== "SHOOTING" &&
-                !(gameState === "GAME_OVER" && player.health <= 0)) ||
-                message === "BANG!" ||
-                message === "Click.") && (
-                <div className="text-center max-w-2xl mx-auto flex flex-col gap-0.5 items-center pointer-events-auto select-text z-20">
-                  <h2 className="text-base sm:text-lg font-mono text-white tracking-[0.2em] font-bold uppercase drop-shadow-[0_2px_8px_rgba(0,0,0,1.0)]">
-                    {message}
-                  </h2>
-                  {subMessage && (
-                    <p className="text-red-500 font-serif italic text-xs sm:text-sm drop-shadow-[0_1.5px_4px_rgba(0,0,0,1.0)]">
-                      {subMessage}
-                    </p>
-                  )}
-                </div>
-              )}
             </div>
+
+            {/* Dialogue Box: Centered precisely above the bottom shoot self hitbox, borderless and highly legible */}
+            {gameState !== "SHOOTING" &&
+              !(gameState === "GAME_OVER" && player.health <= 0) && (
+              <div className="absolute bottom-[25.5vh] md:bottom-[30.5vh] left-1/2 -translate-x-1/2 text-center max-w-2xl w-full px-4 flex flex-col gap-1.5 items-center pointer-events-none select-text z-20 animate-fade-in">
+                <h2 className="text-base sm:text-lg md:text-xl font-mono text-white tracking-[0.2em] font-bold uppercase drop-shadow-[0_2px_12px_rgba(0,0,0,1.0)]">
+                  {message}
+                </h2>
+                {subMessage && (
+                  <p className="text-red-500 font-serif italic text-xs sm:text-sm md:text-base drop-shadow-[0_1.5px_6px_rgba(0,0,0,1.0)]">
+                    {subMessage}
+                  </p>
+                )}
+              </div>
+            )}
           </div>
         </>
       )}

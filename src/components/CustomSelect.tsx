@@ -91,7 +91,7 @@ export function CustomSelect<T extends string | number = string>({
         disabled={disabled}
         onClick={() => setIsOpen((prev) => !prev)}
         onKeyDown={handleKeyDown}
-        className={`w-full min-h-[44px] frosted-glass-ui border transition-all duration-150 rounded-none px-3 py-2.5 flex items-center justify-between gap-3 text-xs tracking-wider outline-none cursor-pointer ${
+        className={`w-full min-h-[44px] bg-[#120b18]/80 border transition-all duration-150 rounded-none px-3 py-2.5 flex items-center justify-between gap-3 text-xs tracking-wider outline-none cursor-pointer ${
           isOpen
             ? 'border-red-600 shadow-[0_0_15px_rgba(220,38,38,0.25)] text-white'
             : 'border-neutral-700/80 hover:border-neutral-500 text-neutral-200'
@@ -129,12 +129,12 @@ export function CustomSelect<T extends string | number = string>({
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -4, scale: 0.98 }}
             transition={{ duration: 0.12, ease: 'easeOut' }}
-            className={`absolute left-0 right-0 mt-1 z-50 frosted-glass-ui border-2 border-red-900/90 shadow-[0_12px_32px_rgba(0,0,0,0.95),0_0_20px_rgba(153,27,27,0.3)] max-h-60 overflow-y-auto custom-scrollbar ${
+            className={`absolute left-0 right-0 mt-1 z-50 frosted-glass-options-dropdown border-2 border-red-900/90 shadow-[0_20px_48px_rgba(0,0,0,0.95),0_0_30px_rgba(185,28,28,0.35)] max-h-60 overflow-y-auto custom-scrollbar ${
               align === 'right' ? 'right-0 left-auto' : ''
             }`}
           >
             {/* Top decorative hazard accent line */}
-            <div className="h-0.5 w-full bg-gradient-to-r from-red-600 via-neutral-800 to-red-600" />
+            <div className="h-0.5 w-full bg-gradient-to-r from-red-600 via-neutral-200/40 to-red-600" />
 
             <div className="p-1 space-y-0.5">
               {options.map((option) => {
@@ -147,10 +147,10 @@ export function CustomSelect<T extends string | number = string>({
                       onChange(option.value);
                       setIsOpen(false);
                     }}
-                    className={`w-full text-left px-3 py-2 flex items-center justify-between gap-2 text-xs transition-all duration-100 cursor-pointer ${
+                    className={`w-full text-left px-3 py-2 flex items-center justify-between gap-2 text-xs cursor-pointer ${
                       isSelected
-                        ? 'bg-red-950/70 border-l-2 border-l-red-500 text-white font-bold shadow-inner'
-                        : 'text-neutral-300 hover:bg-neutral-900 hover:text-white border-l-2 border-l-transparent hover:border-l-red-700/60'
+                        ? 'frosted-glass-option-selected text-white font-bold'
+                        : 'frosted-glass-option-item text-neutral-200 hover:text-white'
                     } ${optionClassName}`}
                   >
                     <div className="flex flex-col gap-0.5 truncate">
@@ -165,14 +165,14 @@ export function CustomSelect<T extends string | number = string>({
                         )}
                       </div>
                       {option.description && (
-                        <span className="text-[10px] text-neutral-400 font-sans tracking-normal font-normal">
+                        <span className="text-[10px] text-neutral-300/80 font-sans tracking-normal font-normal">
                           {option.description}
                         </span>
                       )}
                     </div>
 
                     {isSelected && (
-                      <Check className="w-3.5 h-3.5 text-red-500 flex-shrink-0 ml-1 stroke-[3]" />
+                      <Check className="w-3.5 h-3.5 text-red-400 flex-shrink-0 ml-1 stroke-[3]" />
                     )}
                   </button>
                 );

@@ -5,12 +5,13 @@ import { pass } from 'three/tsl';
 import { fsr1 } from 'three/examples/jsm/tsl/display/FSR1Node.js';
 import { sharpen } from 'three/examples/jsm/tsl/display/SharpenNode.js';
 import { motion } from 'motion/react';
-import { GameState, Chamber, PlayerState, ItemType } from '../types';
-import { playBulletLoad, playPurchaseSound, playSyringeCap, playSyringeSlam, playThumpSound, playTapSound, playEmptyClick, playCockSound } from '../audio';
+import { GameState, Chamber, PlayerState, ItemType, Difficulty } from '../types';
+import { getItemPrice, ITEM_METADATA, getRarityTagHtml } from '../gameData';
+import { playBulletLoad, playPurchaseSound, playSyringeCap, playSyringeSlam, playThumpSound, playTapSound } from '../audio';
 import { getControllerSettings } from '../controller';
 import { createWebGPURenderer, isWebGPUSupported } from '../renderers/RendererManager';
 import { updateGamepads, vibrateGamepad } from '../controller';
-import { AlertCircle, Terminal, Cpu, RefreshCw } from 'lucide-react';
+import { AlertCircle, Terminal, Cpu, RefreshCw, ShieldCheck } from 'lucide-react';
 
 interface Arena3DProps {
   gameState: GameState;
@@ -31,13 +32,9 @@ interface Arena3DProps {
   buyItem: (type: ItemType, cost: number) => void;
   playerDamageReductionEnd: number | null;
   dealerDamageReductionEnd: number | null;
-  loadingPhase: 'pickup' | 'spin';
-  bulletsInserted: number;
-  bulletTargetCount: number;
-  bluffActiveTurns: number;
-  onBulletInserted: () => void;
-  onSpinComplete: (index: number) => void;
-  onAutoLoad: () => void;
+  difficulty?: Difficulty;
+  shooter: 'player' | 'dealer' | null;
+  target: 'player' | 'dealer' | null;
 }
 
 const ITEM_DESCS: Record<string, string> = {
@@ -50,8 +47,34 @@ const ITEM_DESCS: Record<string, string> = {
   SCALPEL: 'CUTS THE BARREL TOP. THE NEXT DISCHARGED LIVE SHELL DEALS DOUBLE THE AGONY.',
   DEFIBRILLATOR: 'ELECTRIC RESTART CHARGE. AUTOMATIC RESUSCITATION GUARANTEE IN CASE OF TERMINAL IMPACTS.',
   SYRINGE: 'INSTANT SURGE. DIRECT INJECTION THAT RESTORES 50 HP TO VITALITY.',
-  RAZORBLADE: 'SLASH FLESH TO MAGICALLY CONVERT THE CURRENT BLANK INTO A LIVE ROUND AT THE COST OF 10 HP.'
+  RAZORBLADE: 'SLASH FLESH TO MAGICALLY CONVERT THE CURRENT BLANK INTO A LIVE ROUND AT THE COST OF 10 HP.',
+  MEDKIT: 'ADVANCED MEDICAL SUPPLIES. FULLY RESTORES HEALTH TO MAXIMUM.'
 };
+
+// Universal safety patch on LightShadow.prototype.map to prevent "Cannot read properties of null (reading 'depthTexture')"
+const dummyLight = new THREE.DirectionalLight();
+const LightShadowClass = Object.getPrototypeOf(dummyLight.shadow.constructor); // Get base LightShadow class
+if (LightShadowClass && LightShadowClass.prototype && !(LightShadowClass.prototype as any)._safeMapPatched) {
+  (LightShadowClass.prototype as any)._safeMapPatched = true;
+  const dummyRenderTarget: any = {
+    texture: new THREE.Texture(),
+    depthTexture: new THREE.DepthTexture(1, 1),
+    width: 1,
+    height: 1,
+    dispose: () => {},
+  };
+  const realMapSymbol = Symbol('realMap');
+  Object.defineProperty(LightShadowClass.prototype, 'map', {
+    get() {
+      return this[realMapSymbol] ?? dummyRenderTarget;
+    },
+    set(val) {
+      this[realMapSymbol] = val;
+    },
+    configurable: true,
+    enumerable: true,
+  });
+}
 
 export function Arena3D({
   gameState,
@@ -72,13 +95,9 @@ export function Arena3D({
   buyItem,
   playerDamageReductionEnd,
   dealerDamageReductionEnd,
-  loadingPhase,
-  bulletsInserted,
-  bulletTargetCount,
-  bluffActiveTurns,
-  onBulletInserted,
-  onSpinComplete,
-  onAutoLoad,
+  difficulty = 'NORMAL',
+  shooter,
+  target,
 }: Arena3DProps) {
   const [inputType, setInputType] = useState<'kbm' | 'gamepad'>('kbm');
   const [graphics, setGraphics] = useState({
@@ -153,14 +172,16 @@ export function Arena3D({
   const splatIdCounter = useRef(0);
 
   const spawnScreenSplat = () => {
-    if (getControllerSettings().bloodEffectsEnabled === false) return;
-
+    const s = getControllerSettings();
+    if (s.bloodEffectsEnabled === false) return;
     const id = splatIdCounter.current++;
+    const pQuality = s.particleQuality || 'high';
+    const isLow = pQuality === 'low' || pQuality === 'off';
     const newSplat: ScreenSplat = {
       id,
       x: Math.random() * 80 + 10,
       y: Math.random() * 80 + 10,
-      scale: 0.8 + Math.random() * 1.8,
+      scale: isLow ? (0.6 + Math.random() * 0.8) : (0.8 + Math.random() * 1.8),
       rotation: Math.random() * 360,
     };
     setScreenSplats(prev => [...prev, newSplat]);
@@ -241,10 +262,8 @@ export function Arena3D({
     dealerFlinchTime: 0,
     isTouchActive: false,
     graphics,
-    loadingPhase,
-    bulletsInserted,
-    bulletTargetCount,
-    bluffActiveTurns,
+    shooter: shooter,
+    target: target,
   });
 
   useEffect(() => {
@@ -269,10 +288,8 @@ export function Arena3D({
       dealerFlinchTime: stateRef.current.dealerFlinchTime,
       isTouchActive: stateRef.current.isTouchActive,
       graphics,
-      loadingPhase,
-      bulletsInserted,
-      bulletTargetCount,
-      bluffActiveTurns,
+      shooter,
+      target,
     };
   }, [
     gameState,
@@ -291,10 +308,8 @@ export function Arena3D({
     playerDamageReductionEnd,
     dealerDamageReductionEnd,
     graphics,
-    loadingPhase,
-    bulletsInserted,
-    bulletTargetCount,
-    bluffActiveTurns,
+    shooter,
+    target,
   ]);
 
   // Persist animation state across prop updates to prevent double-animations
@@ -341,6 +356,8 @@ export function Arena3D({
     animTarget: 'player' as 'player' | 'dealer',
     animIsLive: false,
     lastFireTime: 0,
+    isFadingBlood: false,
+    bloodFadeTimer: 0,
     lastFireIsLive: false,
     hasThumpedPlayerFall: false,
     hasThumpedPlayerTable: false,
@@ -352,32 +369,23 @@ export function Arena3D({
     instantiatedDealerCount: 0,
     rebuildRequired: false,
     prevMuzzleWorldPos: null as THREE.Vector3 | null,
-    // --- INTERACTIVE MANUAL LOADING SYSTEM ---
-    loadingSceneBuilt: false,
-    ammoBlock: null as THREE.Group | null,
-    loadBullets: [] as THREE.Group[],
-    slotMarkers: [] as THREE.Object3D[],
-    filledSlots: [] as boolean[],
-    slotHighlight: null as THREE.Mesh | null,
-    spinZone: null as THREE.Mesh | null,
-    spinProxy: null as THREE.Group | null,
-    spinParts: [] as THREE.Object3D[],
-    carriedBulletIdx: -1,
-    isDraggingBullet: false,
-    dragLastPoint: null as THREE.Vector3 | null,
-    highlightedSlot: -1,
-    insertAnims: [] as { bullet: THREE.Group; from: THREE.Vector3; to: THREE.Vector3; t: number }[],
-    returnAnims: [] as { bullet: THREE.Group; from: THREE.Vector3; to: THREE.Vector3; t: number }[],
-    propQuat: null as THREE.Quaternion | null,
-    propPos: null as THREE.Vector3 | null,
-    spinGestureActive: false,
-    spinAngle: 0,
-    spinVel: 0,
-    spinLastAngle: 0,
-    spinLastTime: 0,
-    spinSettled: false,
-    spinRatchetSector: 0,
-    loadCamInit: false,
+    // Fluid & Liquid Physics Simulation State
+    whiskeyVolume: 1.0,
+    whiskeySloshAngleX: 0,
+    whiskeySloshAngleZ: 0,
+    whiskeySloshVelX: 0,
+    whiskeySloshVelZ: 0,
+    syringeBubblePos: 0.28,
+    syringeBubblePosX: 0.008,
+    syringeBubblePosZ: 0,
+    syringeBubbleVel: 0,
+    syringeBubbleVelX: 0,
+    syringeBubbleVelZ: 0,
+    syringeFluidVolume: 1.0,
+    syringeFluidOscillation: 0,
+    syringeFluidOscVel: 0,
+    prevItemPos: new THREE.Vector3(),
+    prevItemRot: new THREE.Euler()
   });
 
   useEffect(() => {
@@ -386,8 +394,7 @@ export function Arena3D({
     const container = containerRef.current;
     const canvas = canvasRef.current;
 
-    // --- ANIMATION / INTERACTION STATES moved to animRef (early: fixtures use it) ---
-    const ar = animRef.current;
+    let handleResize: (() => void) | null = null;
 
     // --- MATERIALS (CONSOLIDATED AT TOP) ---
     const rustySteelMat = new THREE.MeshStandardMaterial({
@@ -488,103 +495,157 @@ export function Arena3D({
       const zippoGroup = new THREE.Group();
       zippoGroup.name = 'zippoGroup';
 
-      // Brushed Chrome & Metal Materials
-      const chromeMat = new THREE.MeshStandardMaterial({ color: 0xdcdce5, metalness: 0.95, roughness: 0.18 });
-      const darkSteelMat = new THREE.MeshStandardMaterial({ color: 0x555560, metalness: 0.88, roughness: 0.35 });
-      const brassMat = new THREE.MeshStandardMaterial({ color: 0xd4af37, metalness: 0.9, roughness: 0.2 });
+      // High-grade Matte Black Casing & Metallic Materials
+      const chromeMat = new THREE.MeshStandardMaterial({
+        color: 0x18181a,
+        metalness: 0.85,
+        roughness: 0.35,
+        envMapIntensity: 1.2
+      });
+      const steelInsertMat = new THREE.MeshStandardMaterial({
+        color: 0x888899,
+        metalness: 0.92,
+        roughness: 0.25
+      });
+      const darkSteelMat = new THREE.MeshStandardMaterial({
+        color: 0x33333d,
+        metalness: 0.9,
+        roughness: 0.4
+      });
+      const brassMat = new THREE.MeshStandardMaterial({
+        color: 0xd4af37,
+        metalness: 0.9,
+        roughness: 0.2
+      });
 
-      // Lower Case (Lighter Body)
+      // 1. Lower Chrome Casing (Lighter Body)
       const bodyGeo = new THREE.BoxGeometry(0.08, 0.11, 0.042);
       const lighterBody = new THREE.Mesh(bodyGeo, chromeMat);
       lighterBody.position.y = 0.055;
       lighterBody.castShadow = true;
+      lighterBody.receiveShadow = true;
       zippoGroup.add(lighterBody);
 
-      // Bottom stamp plate / brass base accent line
-      const baseAccent = new THREE.Mesh(new THREE.BoxGeometry(0.078, 0.008, 0.04), brassMat);
-      baseAccent.position.y = 0.004;
-      zippoGroup.add(baseAccent);
+      // Bottom Stamp Plate (Authentic Zippo Bradford PA stamp etching)
+      const bottomStampGeo = new THREE.BoxGeometry(0.076, 0.004, 0.038);
+      const bottomStampMat = new THREE.MeshStandardMaterial({ color: 0xb8b8c5, metalness: 0.95, roughness: 0.3 });
+      const bottomStamp = new THREE.Mesh(bottomStampGeo, bottomStampMat);
+      bottomStamp.position.y = 0.002;
+      zippoGroup.add(bottomStamp);
 
-      // Steel Inner Insert
-      const insertGeo = new THREE.BoxGeometry(0.074, 0.035, 0.038);
-      const insertMesh = new THREE.Mesh(insertGeo, darkSteelMat);
-      insertMesh.position.y = 0.12;
+      // 2. 5-Barrel Hinge System on Left Vertical Seam
+      const hingeGroup = new THREE.Group();
+      hingeGroup.position.set(-0.0405, 0.11, 0);
+      for (let i = 0; i < 5; i++) {
+        const barrelMat = i % 2 === 0 ? chromeMat : steelInsertMat;
+        const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.0045, 0.0045, 0.007, 10), barrelMat);
+        barrel.rotation.x = Math.PI / 2;
+        barrel.position.z = -0.014 + i * 0.007;
+        hingeGroup.add(barrel);
+      }
+      // Hinge central steel pin
+      const hingePin = new THREE.Mesh(new THREE.CylinderGeometry(0.002, 0.002, 0.038, 8), darkSteelMat);
+      hingePin.rotation.x = Math.PI / 2;
+      hingeGroup.add(hingePin);
+      zippoGroup.add(hingeGroup);
+
+      // 3. Steel Inner Insert Module
+      const insertGeo = new THREE.BoxGeometry(0.074, 0.04, 0.038);
+      const insertMesh = new THREE.Mesh(insertGeo, steelInsertMat);
+      insertMesh.position.y = 0.125;
       zippoGroup.add(insertMesh);
 
-      // Windproof Chimney (Perforated Guard)
-      const chimneyGeo = new THREE.BoxGeometry(0.05, 0.045, 0.032);
-      const chimney = new THREE.Mesh(chimneyGeo, darkSteelMat);
-      chimney.position.y = 0.145;
+      // 4. Windproof Chimney Guard (Arch Profile with 16 Air Vent Holes)
+      const chimneyGeo = new THREE.BoxGeometry(0.048, 0.045, 0.032);
+      const chimney = new THREE.Mesh(chimneyGeo, steelInsertMat);
+      chimney.position.set(-0.004, 0.15, 0);
       zippoGroup.add(chimney);
 
-      // Air Vents on Chimney sides
-      const ventGeo = new THREE.BoxGeometry(0.005, 0.032, 0.024);
-      const ventMat = new THREE.MeshStandardMaterial({ color: 0x111115, roughness: 0.9 });
-      const ventLeft = new THREE.Mesh(ventGeo, ventMat);
-      ventLeft.position.set(-0.023, 0.145, 0);
-      const ventRight = new THREE.Mesh(ventGeo, ventMat);
-      ventRight.position.set(0.023, 0.145, 0);
-      zippoGroup.add(ventLeft);
-      zippoGroup.add(ventRight);
+      // 16 Vent Holes (8 per side on +Z and -Z faces)
+      const holeGeo = new THREE.CylinderGeometry(0.0035, 0.0035, 0.002, 10);
+      const holeMat = new THREE.MeshStandardMaterial({ color: 0x111116, roughness: 0.95 });
+      [-0.016, 0.016].forEach(zPos => {
+        for (let row = 0; row < 2; row++) {
+          for (let col = 0; col < 4; col++) {
+            const hole = new THREE.Mesh(holeGeo, holeMat);
+            hole.rotation.x = Math.PI / 2;
+            hole.position.set(-0.02 + col * 0.01, 0.142 + row * 0.014, zPos);
+            zippoGroup.add(hole);
+          }
+        }
+      });
 
-      // Wick inside chimney
-      const wickGeo = new THREE.CylinderGeometry(0.004, 0.004, 0.025, 8);
-      const wickMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 1.0 });
-      const wick = new THREE.Mesh(wickGeo, wickMat);
-      wick.position.set(-0.008, 0.155, 0);
-      zippoGroup.add(wick);
+      // 5. Cam Spring Lever (Flipping latch mechanism near hinge)
+      const camLeverGeo = new THREE.BoxGeometry(0.008, 0.016, 0.012);
+      const camLever = new THREE.Mesh(camLeverGeo, darkSteelMat);
+      camLever.position.set(-0.032, 0.135, 0);
+      zippoGroup.add(camLever);
 
-      // Flint Wheel
-      const wheelGeo = new THREE.CylinderGeometry(0.012, 0.012, 0.016, 16);
+      // 6. Serrated Flint Striking Wheel & Brass Rivet Pin
+      const wheelGeo = new THREE.CylinderGeometry(0.013, 0.013, 0.016, 16);
       const flintWheel = new THREE.Mesh(wheelGeo, darkSteelMat);
       flintWheel.rotation.z = Math.PI / 2;
-      flintWheel.position.set(0.02, 0.152, 0);
+      flintWheel.position.set(0.018, 0.158, 0);
       zippoGroup.add(flintWheel);
 
-      // Hinge Knuckle
-      const hingeGeo = new THREE.CylinderGeometry(0.005, 0.005, 0.038, 8);
-      const hinge = new THREE.Mesh(hingeGeo, chromeMat);
-      hinge.rotation.x = Math.PI / 2;
-      hinge.position.set(-0.04, 0.11, 0);
-      zippoGroup.add(hinge);
+      const rivetGeo = new THREE.CylinderGeometry(0.003, 0.003, 0.034, 8);
+      const rivet = new THREE.Mesh(rivetGeo, brassMat);
+      rivet.rotation.x = Math.PI / 2;
+      rivet.position.set(0.018, 0.158, 0);
+      zippoGroup.add(rivet);
 
-      // Real 3D Flame Group
+      // 7. Braided Cotton Wick with Copper Threads
+      const wickGeo = new THREE.CylinderGeometry(0.004, 0.004, 0.024, 8);
+      const wickMat = new THREE.MeshStandardMaterial({ color: 0x282828, roughness: 0.9 });
+      const wick = new THREE.Mesh(wickGeo, wickMat);
+      wick.position.set(-0.01, 0.16, 0);
+      zippoGroup.add(wick);
+
+      // Copper wire strands sticking out of wick
+      const copperGeo = new THREE.CylinderGeometry(0.001, 0.001, 0.015, 6);
+      const copperMat = new THREE.MeshStandardMaterial({ color: 0xb87333, metalness: 0.9, roughness: 0.3 });
+      const copperStrand = new THREE.Mesh(copperGeo, copperMat);
+      copperStrand.position.set(-0.009, 0.165, 0.002);
+      copperStrand.rotation.z = 0.2;
+      zippoGroup.add(copperStrand);
+
+      // 8. Dynamic 3D Flame System (Inner Blue Cone + Outer Warm Amber Cone + Light)
       const flameGroup = new THREE.Group();
       flameGroup.name = 'zippoFlame';
-      flameGroup.position.set(-0.008, 0.165, 0);
+      flameGroup.position.set(-0.01, 0.172, 0);
       flameGroup.visible = false;
 
-      const flameGeo = new THREE.ConeGeometry(0.02, 0.08, 10);
+      const flameGeo = new THREE.ConeGeometry(0.018, 0.075, 12);
       const flameMat = new THREE.MeshStandardMaterial({
-        color: 0xffaa00,
-        emissive: 0xff6600,
-        emissiveIntensity: 6.0,
+        color: 0xffa500,
+        emissive: 0xff5500,
+        emissiveIntensity: 5.5,
         transparent: true,
-        opacity: 0.95
+        opacity: 0.92
       });
       const flameMesh = new THREE.Mesh(flameGeo, flameMat);
-      flameMesh.position.y = 0.04;
+      flameMesh.position.y = 0.0375;
       flameGroup.add(flameMesh);
 
-      const innerFlameGeo = new THREE.ConeGeometry(0.009, 0.04, 10);
+      const innerFlameGeo = new THREE.ConeGeometry(0.008, 0.035, 10);
       const innerFlameMat = new THREE.MeshStandardMaterial({
-        color: 0x66aaff,
-        emissive: 0x0088ff,
+        color: 0x4499ff,
+        emissive: 0x0077ff,
         emissiveIntensity: 8.0,
         transparent: true,
         opacity: 0.95
       });
       const innerFlameMesh = new THREE.Mesh(innerFlameGeo, innerFlameMat);
-      innerFlameMesh.position.y = 0.02;
+      innerFlameMesh.position.y = 0.0175;
       flameGroup.add(innerFlameMesh);
 
-      const flameLight = new THREE.PointLight(0xffa500, 2.0, 1.8);
-      flameLight.position.y = 0.04;
+      const flameLight = new THREE.PointLight(0xffa500, 2.5, 2.0);
+      flameLight.position.y = 0.0375;
       flameGroup.add(flameLight);
 
       zippoGroup.add(flameGroup);
 
-      // Hinged Cap Group
+      // 9. Hinged Cap Lid Group
       const capGroup = new THREE.Group();
       capGroup.name = 'zippoCap';
       capGroup.position.set(-0.04, 0.11, 0);
@@ -598,6 +659,7 @@ export function Arena3D({
 
     const createItemMesh = (type: ItemType): THREE.Group => {
       const parent = new THREE.Group();
+      parent.userData.itemType = type;
       switch (type) {
         case 'MIRROR': {
           const fGeo = new THREE.TorusGeometry(0.15, 0.03, 8, 16);
@@ -666,43 +728,46 @@ export function Arena3D({
         case 'WHISKEY': {
           const botGeo = new THREE.BoxGeometry(0.16, 0.35, 0.16);
           const glassMat = new THREE.MeshStandardMaterial({
-            color: 0x4a2a10,
+            color: 0x1a120c,
             roughness: 0.1,
-            metalness: 0.1,
+            metalness: 0.2,
             transparent: true,
-            opacity: 0.55,
+            opacity: 0.45,
           });
           const botMesh = new THREE.Mesh(botGeo, glassMat);
           botMesh.position.y = 0.18;
           botMesh.name = 'whiskeyBottleMesh';
           parent.add(botMesh);
 
-          const liquidGeo = new THREE.BoxGeometry(0.145, 0.31, 0.145);
+          // Liquid geometry: width/depth 0.134 (strictly inside 0.16 bottle cavity)
+          // Translated so base y=0 sits cleanly on bottle floor
+          const liquidGeo = new THREE.BoxGeometry(0.134, 0.28, 0.134);
+          liquidGeo.translate(0, 0.14, 0);
           const liquidMat = new THREE.MeshStandardMaterial({
-            color: 0xd97706,
+            color: 0x822e08,
             roughness: 0.05,
             metalness: 0.1,
             transparent: true,
-            opacity: 0.88,
-            emissive: 0x331800,
+            opacity: 0.92,
+            emissive: 0x220a02,
           });
           const liquidMesh = new THREE.Mesh(liquidGeo, liquidMat);
-          liquidMesh.position.y = 0.16;
+          liquidMesh.position.y = 0.015;
           liquidMesh.name = 'whiskeyLiquidMesh';
           parent.add(liquidMesh);
 
-          const meniscusGeo = new THREE.PlaneGeometry(0.14, 0.14);
+          const meniscusGeo = new THREE.PlaneGeometry(0.132, 0.132);
           const meniscusMat = new THREE.MeshStandardMaterial({
-            color: 0xf59e0b,
+            color: 0x9c3d0c,
             roughness: 0.0,
             metalness: 0.2,
             transparent: true,
-            opacity: 0.95,
+            opacity: 0.92,
             side: THREE.DoubleSide
           });
           const meniscus = new THREE.Mesh(meniscusGeo, meniscusMat);
           meniscus.rotation.x = -Math.PI / 2;
-          meniscus.position.y = 0.315;
+          meniscus.position.y = 0.295;
           meniscus.name = 'whiskeyMeniscus';
           parent.add(meniscus);
 
@@ -786,24 +851,13 @@ export function Arena3D({
           emberMesh.position.y = 0.27;
           cigGroup.add(emberMesh);
 
-          // 3. Classic Branded Cigarette Pack on shelf
-          const packGroup = new THREE.Group();
-          packGroup.name = 'cigPack';
-          packGroup.position.set(-0.08, 0, 0);
-          const packBoxGeo = new THREE.BoxGeometry(0.08, 0.14, 0.04);
-          const packMat = new THREE.MeshStandardMaterial({ color: 0xaa0505, roughness: 0.6 });
-          const packMesh = new THREE.Mesh(packBoxGeo, packMat);
-          packMesh.position.y = 0.07;
-          packGroup.add(packMesh);
-
-          // Gold foil top insert
-          const foilGeo = new THREE.BoxGeometry(0.075, 0.02, 0.035);
-          const foilMat = new THREE.MeshStandardMaterial({ color: 0xd4af37, metalness: 0.9, roughness: 0.2 });
-          const foilMesh = new THREE.Mesh(foilGeo, foilMat);
-          foilMesh.position.y = 0.145;
-          packGroup.add(foilMesh);
-
-          cigGroup.add(packGroup);
+          // 3. Authentic Matte Black Zippo Lighter Model (Placed realistically alongside cigarette)
+          const zippoOnTable = createZippoMesh();
+          zippoOnTable.name = 'zippoGroup';
+          zippoOnTable.scale.set(0.95, 0.95, 0.95);
+          zippoOnTable.rotation.x = -Math.PI / 2; // lie flat on tabletop
+          zippoOnTable.position.set(0.08, 0.02, -0.1);
+          cigGroup.add(zippoOnTable);
 
           cigGroup.rotation.z = Math.PI / 2; // lie flat on shelf
           cigGroup.position.y = 0.02;
@@ -852,24 +906,27 @@ export function Arena3D({
           barrel.name = 'syringeBarrel';
           parent.add(barrel);
 
-          const fluidGeo = new THREE.CylinderGeometry(0.041, 0.041, 0.22, 12);
+          // Fluid geometry: radius 0.036 (strictly inside 0.045 barrel)
+          // Translated so base y=0 sits at syringe nozzle base y=0.09
+          const fluidGeo = new THREE.CylinderGeometry(0.036, 0.036, 0.22, 16);
+          fluidGeo.translate(0, 0.11, 0);
           const fluidMat = new THREE.MeshStandardMaterial({
-            color: 0x00ffaa,
-            emissive: 0x006633,
+            color: 0x880000,
+            emissive: 0x330000,
             roughness: 0.1,
             metalness: 0.1,
             transparent: true,
             opacity: 0.85,
           });
           const fluid = new THREE.Mesh(fluidGeo, fluidMat);
-          fluid.position.y = 0.2;
+          fluid.position.y = 0.09;
           fluid.name = 'syringeFluid';
           parent.add(fluid);
 
-          const meniscusGeo = new THREE.CircleGeometry(0.04, 12);
+          const meniscusGeo = new THREE.CircleGeometry(0.035, 16);
           const meniscusMat = new THREE.MeshStandardMaterial({
-            color: 0x33ffbb,
-            emissive: 0x11aa66,
+            color: 0xaa0000,
+            emissive: 0x440000,
             side: THREE.DoubleSide,
             transparent: true,
             opacity: 0.9,
@@ -880,17 +937,23 @@ export function Arena3D({
           meniscus.name = 'syringeMeniscus';
           parent.add(meniscus);
 
-          const bubbleGeo = new THREE.SphereGeometry(0.012, 8, 8);
+          const bubbleGeo = new THREE.SphereGeometry(0.008, 8, 8);
           const bubbleMat = new THREE.MeshStandardMaterial({
-            color: 0xaaffdd,
+            color: 0xff6666,
             roughness: 0.1,
             transparent: true,
             opacity: 0.5,
           });
           const bubble = new THREE.Mesh(bubbleGeo, bubbleMat);
-          bubble.position.set(0.015, 0.28, 0);
+          bubble.position.set(0.008, 0.26, 0);
           bubble.name = 'syringeBubble';
           parent.add(bubble);
+
+          const bubbleGeo2 = new THREE.SphereGeometry(0.005, 8, 8);
+          const bubble2 = new THREE.Mesh(bubbleGeo2, bubbleMat);
+          bubble2.position.set(-0.006, 0.22, 0.004);
+          bubble2.name = 'syringeBubble2';
+          parent.add(bubble2);
 
           const plungerGeo = new THREE.CylinderGeometry(0.008, 0.008, 0.16, 6);
           const plungerMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.6 });
@@ -1001,6 +1064,64 @@ export function Arena3D({
           parent.add(bladeGroup);
           break;
         }
+        case 'MEDKIT': {
+          const medkitGroup = new THREE.Group();
+          
+          // Main Body (White box)
+          const bodyGeo = new THREE.BoxGeometry(0.3, 0.15, 0.2);
+          const matBody = new THREE.MeshStandardMaterial({
+             color: 0xdddddd,
+             roughness: 0.8,
+             metalness: 0.1
+          });
+          const body = new THREE.Mesh(bodyGeo, matBody);
+          body.position.y = 0.075;
+          medkitGroup.add(body);
+
+          // Top Lid (starts closed)
+          const lidGroup = new THREE.Group();
+          lidGroup.position.set(0, 0.15, -0.1); // hinge at back top
+          const lidGeo = new THREE.BoxGeometry(0.3, 0.02, 0.2);
+          const lidMesh = new THREE.Mesh(lidGeo, matBody);
+          lidMesh.position.set(0, 0.01, 0.1); // offset so it covers the box
+          lidGroup.add(lidMesh);
+          lidGroup.name = 'medkitLid';
+
+          // Red Cross on Lid
+          const crossMat = new THREE.MeshStandardMaterial({ color: 0xaa0000, roughness: 0.9 });
+          const crossV = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.022, 0.1), crossMat);
+          crossV.position.set(0, 0.01, 0.1);
+          lidGroup.add(crossV);
+          const crossH = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.022, 0.04), crossMat);
+          crossH.position.set(0, 0.01, 0.1);
+          lidGroup.add(crossH);
+
+          medkitGroup.add(lidGroup);
+
+          // Contents inside the box
+          const contentsGroup = new THREE.Group();
+          contentsGroup.name = 'medkitContents';
+          // Add some bandages and pill bottles
+          const bandageMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.9 });
+          const bandage = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.06), bandageMat);
+          bandage.position.set(-0.06, 0.1, -0.02);
+          bandage.rotation.z = Math.PI / 2;
+          contentsGroup.add(bandage);
+
+          const bottleMat = new THREE.MeshStandardMaterial({ color: 0xda8a35, roughness: 0.3, transparent: true, opacity: 0.8 });
+          const bottle = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.08), bottleMat);
+          bottle.position.set(0.08, 0.1, 0.04);
+          const capMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.5 });
+          const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.026, 0.026, 0.02), capMat);
+          cap.position.set(0, 0.05, 0);
+          bottle.add(cap);
+          contentsGroup.add(bottle);
+
+          medkitGroup.add(contentsGroup);
+
+          parent.add(medkitGroup);
+          break;
+        }
       }
       parent.traverse((child) => {
         if (child instanceof THREE.Mesh) {
@@ -1009,31 +1130,6 @@ export function Arena3D({
         }
       });
       return parent;
-    };
-
-    // Shared pulsing red glow outline used to mark the currently selected /
-    // hovered item. Edges trace the ACTUAL curves of the item's own geometry
-    // (torus, cylinder, box edges...) by attaching edge lines directly to each
-    // child mesh — they inherit every parent transform automatically.
-    const outlineMatRed = new THREE.LineBasicMaterial({
-      color: 0xff2a2a,
-      transparent: true,
-      opacity: 0.9,
-      depthTest: false,
-    });
-    const addRedOutline = (itemObj: THREE.Group) => {
-      const outlines: THREE.LineSegments[] = [];
-      itemObj.traverse((child) => {
-        if (child instanceof THREE.Mesh && child.geometry) {
-          const edgeGeo = new THREE.EdgesGeometry(child.geometry, 18);
-          const lines = new THREE.LineSegments(edgeGeo, outlineMatRed);
-          lines.renderOrder = 100;
-          lines.visible = false;
-          child.add(lines);
-          outlines.push(lines);
-        }
-      });
-      itemObj.userData.outlines = outlines;
     };
 
     // --- SETUP THREE.JS ---
@@ -1047,6 +1143,8 @@ export function Arena3D({
     let renderer: any = null;
     let renderPipeline: any = null;
     let scenePass: any = null;
+    let currentPostprocessingKey = '';
+    let currentPostprocessingNode: any = null;
 
     const initRenderer = async () => {
       setWebGpuError(null);
@@ -1316,32 +1414,32 @@ export function Arena3D({
 
     // Fill shop with buyable item meshes
     const shopItemMeshes: THREE.Group[] = [];
-    const SHOP_ITEMS: { type: ItemType; cost: number; shelf: number; pos: number }[] = [
-      { type: 'MIRROR', cost: 15, shelf: 0, pos: -1.8 },
-      { type: 'PLIERS', cost: 20, shelf: 0, pos: -0.9 },
-      { type: 'RAZORBLADE', cost: 35, shelf: 0, pos: 0 },
-      { type: 'WHISKEY', cost: 25, shelf: 0, pos: 0.9 },
-      { type: 'TOURNIQUET', cost: 30, shelf: 0, pos: 1.8 },
-      { type: 'PENTAGRAM', cost: 50, shelf: 1, pos: -1.8 },
-      { type: 'CIGARETTE', cost: 25, shelf: 1, pos: -0.9 },
-      { type: 'SYRINGE', cost: 80, shelf: 1, pos: 0 },
-      { type: 'SCALPEL', cost: 35, shelf: 1, pos: 0.9 },
-      { type: 'DEFIBRILLATOR', cost: 60, shelf: 1, pos: 1.8 },
+    const SHOP_ITEMS_BASE: { type: ItemType; shelf: number; pos: number }[] = [
+      { type: 'MIRROR', shelf: 0, pos: -1.8 },
+      { type: 'PLIERS', shelf: 0, pos: -0.9 },
+      { type: 'RAZORBLADE', shelf: 0, pos: 0 },
+      { type: 'WHISKEY', shelf: 0, pos: 0.9 },
+      { type: 'TOURNIQUET', shelf: 0, pos: 1.8 },
+      { type: 'PENTAGRAM', shelf: 1, pos: -1.8 },
+      { type: 'CIGARETTE', shelf: 1, pos: -0.9 },
+      { type: 'SYRINGE', shelf: 1, pos: 0 },
+      { type: 'SCALPEL', shelf: 1, pos: 0.9 },
+      { type: 'DEFIBRILLATOR', shelf: 1, pos: 1.8 },
     ];
 
     const tagGeo = new THREE.PlaneGeometry(0.35, 0.18);
 
-    SHOP_ITEMS.forEach(itemInfo => {
+    SHOP_ITEMS_BASE.forEach(itemInfo => {
+      const scaledCost = getItemPrice(itemInfo.type, difficulty);
       const itemMesh = createItemMesh(itemInfo.type);
       const shelfY = itemInfo.shelf === 0 ? 0.55 : 1.5;
       itemMesh.position.set(0, shelfY, itemInfo.pos);
       itemMesh.scale.set(1.5, 1.5, 1.5); 
       itemMesh.rotation.y = 0; // Face the camera (+X)
-      itemMesh.userData = { isShopItem: true, type: itemInfo.type, cost: itemInfo.cost };
-      addRedOutline(itemMesh);
+      itemMesh.userData = { isShopItem: true, type: itemInfo.type, cost: scaledCost };
       
       // Price tag - angled physical label
-      const tagTexture = createTextTexture(`${itemInfo.cost}B`, '#0a0a0a', '#00ff44');
+      const tagTexture = createTextTexture(`${scaledCost}B`, '#0a0a0a', '#00ff44');
       const tagMat = new THREE.MeshBasicMaterial({ 
         map: tagTexture, 
         transparent: true,
@@ -1666,21 +1764,13 @@ export function Arena3D({
     gunGroup.add(lanyardRingMesh);
 
     // Revolver Cylinder (Drum) inside the frame - High Poly Cylinder
-    // The drum + its flutes + rims all live in ONE proxy group so that the
-    // manual cylinder spin (and chamber indexing) rotates the entire physical
-    // cylinder assembly as a single rigid body.
-    const spinProxy = new THREE.Group();
-    spinProxy.position.set(0, 0.12, -0.05);
-    gunGroup.add(spinProxy);
-    ar.spinProxy = spinProxy;
-
     const cylDrumGeo = new THREE.CylinderGeometry(0.18, 0.18, 0.38, drumSegments);
     cylDrumGeo.rotateX(Math.PI / 2);
     const revolverCylinderMesh = new THREE.Mesh(cylDrumGeo, gunMetalMat);
-    revolverCylinderMesh.position.set(0, 0, 0);
+    revolverCylinderMesh.position.set(0, 0.12, -0.05);
     revolverCylinderMesh.castShadow = true;
     revolverCylinderMesh.receiveShadow = true;
-    spinProxy.add(revolverCylinderMesh);
+    gunGroup.add(revolverCylinderMesh);
 
     // Cylinder flutes (Hollow-like indents for bullet slots)
     const fluteGeo = new THREE.CylinderGeometry(0.042, 0.042, 0.4, isHighPoly ? 12 : 6);
@@ -1691,12 +1781,10 @@ export function Arena3D({
       const flute = new THREE.Mesh(fluteGeo, darkLinerMat);
       flute.position.set(
         Math.sin(angle) * r,
-        Math.cos(angle) * r,
-        0
+        0.12 + Math.cos(angle) * r,
+        -0.05
       );
-      flute.castShadow = true;
-      spinProxy.add(flute);
-      ar.spinParts.push(flute);
+      gunGroup.add(flute);
 
       // Recessed brass cartridge rims visible inside cylinder chambers
       const rimGeo = new THREE.CylinderGeometry(0.046, 0.046, 0.02, 16);
@@ -1704,10 +1792,10 @@ export function Arena3D({
       const brassRim = new THREE.Mesh(rimGeo, brassAccentMat);
       brassRim.position.set(
         Math.sin(angle) * r,
-        Math.cos(angle) * r,
-        -0.19
+        0.12 + Math.cos(angle) * r,
+        -0.24
       );
-      spinProxy.add(brassRim);
+      gunGroup.add(brassRim);
     }
 
     // Ejector ratchet star gear on cylinder rear
@@ -1716,52 +1804,6 @@ export function Arena3D({
     const ejectorStarMesh = new THREE.Mesh(ejectorStarGeo, polishedSteelMat);
     ejectorStarMesh.position.set(0, 0.12, -0.25);
     gunGroup.add(ejectorStarMesh);
-
-    // --- MANUAL LOADING FIXTURES (slot markers, highlight ring, spin zone) ---
-    // Invisible per-chamber markers inside the spinning proxy: their world
-    // positions are the "mouths" the player drops rounds into.
-    ar.slotMarkers = [];
-    for (let i = 0; i < 6; i++) {
-      const angle = (i / 6) * Math.PI * 2;
-      const marker = new THREE.Object3D();
-      marker.position.set(
-        Math.sin(angle) * 0.11,
-        Math.cos(angle) * 0.11,
-        0.14
-      );
-      spinProxy.add(marker);
-      marker.userData.slotIdx = i;
-      ar.slotMarkers.push(marker);
-    }
-
-    // Glowing highlight ring shown above the nearest empty chamber while
-    // the player carries a round.
-    const slotHighlightGeo = new THREE.TorusGeometry(0.05, 0.007, 10, 28);
-    const slotHighlightMat = new THREE.MeshBasicMaterial({
-      color: 0x57ff8a,
-      transparent: true,
-      opacity: 0.9,
-    });
-    const slotHighlight = new THREE.Mesh(slotHighlightGeo, slotHighlightMat);
-    slotHighlight.rotation.x = Math.PI / 2;
-    slotHighlight.visible = false;
-    spinProxy.add(slotHighlight);
-    ar.slotHighlight = slotHighlight;
-
-    // Transparent click-catcher over the cylinder for the spin gesture.
-    const spinZoneGeo = new THREE.CircleGeometry(0.21, 32);
-    const spinZoneMat = new THREE.MeshBasicMaterial({
-      transparent: true,
-      opacity: 0.0001,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-    });
-    const spinZone = new THREE.Mesh(spinZoneGeo, spinZoneMat);
-    spinZone.position.set(0, 0, 0);
-    spinZone.rotation.x = Math.PI / 2;
-    spinProxy.add(spinZone);
-    spinZone.userData.isSpinZone = true;
-    ar.spinZone = spinZone;
 
     // Heavy direct cylinder barrel pointing positive Z (+Z)
     const barrelGeo = new THREE.CylinderGeometry(0.072, 0.065, 0.9, barrelSegments);
@@ -1831,140 +1873,6 @@ export function Arena3D({
     guardMesh.position.set(0, -0.05, -0.1);
     gunGroup.add(guardMesh);
 
-    // --- MANUAL LOADING AMMO BLOCK + HIGHLY REALISTIC BULLET MODEL ---
-    // Smoky polished-brass cased round with a copper-jacketed round-nose slug,
-    // standing muzzle-up in a wooden loading block on the table.
-    const brassCaseMat = new THREE.MeshStandardMaterial({
-      color: 0xb4842f,
-      roughness: 0.28,
-      metalness: 0.95,
-    });
-    const brassRimMat = new THREE.MeshStandardMaterial({
-      color: 0x8a671f,
-      roughness: 0.4,
-      metalness: 0.9,
-    });
-    const primerMat = new THREE.MeshStandardMaterial({
-      color: 0x4a0e0e,
-      roughness: 0.5,
-      metalness: 0.6,
-    });
-    const copperSlugMat = new THREE.MeshStandardMaterial({
-      color: 0xc2793f,
-      roughness: 0.32,
-      metalness: 0.88,
-    });
-
-    const createBullet = (): THREE.Group => {
-      const g = new THREE.Group();
-      const caseGeo = new THREE.CylinderGeometry(0.026, 0.034, 0.20, 24);
-      caseGeo.rotateX(Math.PI / 2);
-      const caseMesh = new THREE.Mesh(caseGeo, brassCaseMat);
-      caseMesh.position.y = 0.11;
-      caseMesh.castShadow = true;
-      caseMesh.receiveShadow = true;
-      g.add(caseMesh);
-
-      const rimGeo = new THREE.CylinderGeometry(0.040, 0.040, 0.018, 24);
-      rimGeo.rotateX(Math.PI / 2);
-      const rimMesh = new THREE.Mesh(rimGeo, brassRimMat);
-      rimMesh.position.y = 0.009;
-      g.add(rimMesh);
-
-      const primerGeo = new THREE.CylinderGeometry(0.012, 0.012, 0.02, 12);
-      primerGeo.rotateX(Math.PI / 2);
-      const primerMesh = new THREE.Mesh(primerGeo, primerMat);
-      primerMesh.position.y = 0.002;
-      g.add(primerMesh);
-
-      const slugGeo = new THREE.CylinderGeometry(0.024, 0.030, 0.085, 24);
-      slugGeo.rotateX(Math.PI / 2);
-      const slugMesh = new THREE.Mesh(slugGeo, copperSlugMat);
-      slugMesh.position.y = 0.253;
-      slugMesh.castShadow = true;
-      g.add(slugMesh);
-
-      const noseGeo = new THREE.SphereGeometry(0.030, 24, 14, 0, Math.PI * 2, 0, Math.PI / 2);
-      noseGeo.rotateZ(Math.PI / 2);
-      noseGeo.scale(1, 1, 0.9);
-      const noseMesh = new THREE.Mesh(noseGeo, copperSlugMat);
-      noseMesh.position.y = 0.325;
-      noseMesh.castShadow = true;
-      g.add(noseMesh);
-
-      g.userData.isLoadBullet = true;
-      g.visible = false;
-      return g;
-    };
-
-    // Wooden loading block with six drilled holes; rounds rest muzzle-up.
-    const ammoBlock = new THREE.Group();
-    ammoBlock.position.set(-0.5, 0.56, 0.2);
-    ammoBlock.rotation.y = 0.35;
-    ammoBlock.visible = false;
-    scene.add(ammoBlock);
-    ar.ammoBlock = ammoBlock;
-
-    const blockBodyGeo = new THREE.BoxGeometry(0.52, 0.07, 0.3);
-    const blockBody = new THREE.Mesh(blockBodyGeo, stockMat);
-    blockBody.position.y = 0.035;
-    blockBody.castShadow = true;
-    blockBody.receiveShadow = true;
-    ammoBlock.add(blockBody);
-
-    const blockLipGeo = new THREE.BoxGeometry(0.56, 0.02, 0.34);
-    const blockLip = new THREE.Mesh(blockLipGeo, stockMat);
-    blockLip.position.y = 0.076;
-    blockLip.castShadow = true;
-    ammoBlock.add(blockLip);
-
-    const blockHoleGeo = new THREE.CylinderGeometry(0.038, 0.038, 0.02, 16);
-    const blockHoles: THREE.Mesh[] = [];
-    for (let i = 0; i < 6; i++) {
-      const hole = new THREE.Mesh(blockHoleGeo, darkLinerMat);
-      hole.position.set(-0.135 + i * 0.054, 0.085, 0);
-      ammoBlock.add(hole);
-      blockHoles.push(hole);
-    }
-
-    const blockSlotPos = (i: number) =>
-      new THREE.Vector3(-0.135 + i * 0.054, 0.135, 0).applyMatrix4(ammoBlock.matrixWorld);
-
-    ar.loadBullets = [];
-    for (let i = 0; i < 6; i++) {
-      const bullet = createBullet();
-      const slot = blockSlotPos(i);
-      bullet.position.copy(slot);
-      bullet.rotation.y = Math.random() * Math.PI * 2;
-      ammoBlock.add(bullet);
-      bullet.userData.bulletIdx = i;
-      ar.loadBullets.push(bullet);
-    }
-
-
-    // --- 3D INTERACTIVE CONTROL plaques ON TABLE ---
-
-    // Immersive, low-profile embedded player shoot-self pad on the tabletop wood
-    const padGeo = new THREE.BoxGeometry(1.0, 0.02, 0.45);
-    const playerSelfPad = new THREE.Mesh(padGeo, selfPadMat);
-    playerSelfPad.position.set(0, 0.42, 0.95);
-    playerSelfPad.castShadow = true;
-    playerSelfPad.receiveShadow = true;
-    playerSelfPad.userData = { isShootSelfButton: true };
-    scene.add(playerSelfPad);
-
-    // Embossed inner plate with deep blood-crimson branding
-    const etchGeo = new THREE.BoxGeometry(0.9, 0.005, 0.38);
-    const etchPlate = new THREE.Mesh(etchGeo, etchMat);
-    etchPlate.position.set(0, 0.012, 0);
-    playerSelfPad.add(etchPlate);
-
-    // Tag the dealer recursively so that any direct click on his face, eyes, cloak or hood triggers shootDealer
-    dealerGroup.traverse((child) => {
-      if (child instanceof THREE.Mesh) {
-        child.userData = { isShootDealerButton: true };
-      }
-    });
 
     // --- THE IMMERSIVE PHYSICAL TV (VITAL SIGNAL MONITORS) ---
     const tvGroup = new THREE.Group();
@@ -2189,40 +2097,60 @@ export function Arena3D({
     const unitShellCylinderGeo = new THREE.CylinderGeometry(0.5, 0.5, 1, 8);
     const unitBulletGeo = new THREE.CylinderGeometry(0.35, 0.35, 1, 8);
     const unitPixelSplatGeo = new THREE.BoxGeometry(1, 1, 0.05);
+    const unitQuadSplatGeo = new THREE.CylinderGeometry(0.5, 0.5, 0.002, 4);
+    const unitHexSplatGeo = new THREE.CylinderGeometry(0.5, 0.5, 0.002, 6);
+    const unitOctagonSplatGeo = new THREE.CylinderGeometry(0.5, 0.5, 0.002, 8);
 
     const sharedBloodMat = new THREE.MeshStandardMaterial({ 
-      color: 0x880202, 
-      roughness: 0.3, 
-      metalness: 0.1,
-      flatShading: true
+      color: 0xffffff, 
+      roughness: 0.65, 
+      metalness: 0.0,
+      flatShading: true,
+      transparent: true,
+      opacity: 1.0,
+      depthWrite: false
     });
     const sharedDarkBloodMat = new THREE.MeshStandardMaterial({ 
-      color: 0x420000, 
-      roughness: 0.6, 
-      metalness: 0.05,
-      flatShading: true
+      color: 0xffffff, 
+      roughness: 0.65, 
+      metalness: 0.0,
+      flatShading: true,
+      transparent: true,
+      opacity: 1.0,
+      depthWrite: false
     });
     const sharedBrightBloodMat = new THREE.MeshStandardMaterial({ 
-      color: 0xb50505, 
-      roughness: 0.15, 
-      metalness: 0.15,
+      color: 0xffffff, 
+      roughness: 0.65, 
+      metalness: 0.0,
       flatShading: true,
-      emissive: 0x220000,
-      emissiveIntensity: 0.25
+      transparent: true,
+      opacity: 1.0,
+      depthWrite: false
+    });
+    const sharedAirborneBloodMat = new THREE.MeshStandardMaterial({ 
+      color: 0x2a0000, 
+      roughness: 0.65, 
+      metalness: 0.0,
+      flatShading: true,
+      transparent: true,
+      opacity: 1.0,
+      depthWrite: false
     });
     const sharedSparkMat = new THREE.MeshBasicMaterial({ 
       color: 0xffcc00 
     });
     const sharedSmokeMat = new THREE.MeshBasicMaterial({ 
-      color: 0x999999, 
+      color: 0xaaaaaa, 
       transparent: true, 
-      opacity: 0.45 
+      opacity: 0.20,
+      depthWrite: false
     });
     const sharedHighSmokeMat = new THREE.MeshStandardMaterial({ 
-      color: 0xcccccc, 
+      color: 0xc0c8d0, 
       transparent: true, 
-      opacity: 0.22, 
-      roughness: 0.95,
+      opacity: 0.12, 
+      roughness: 0.98,
       metalness: 0.0,
       depthWrite: false,
       blending: THREE.NormalBlending
@@ -2237,7 +2165,7 @@ export function Arena3D({
       roughness: 0.8 
     });
     const sharedSplatMat = new THREE.MeshBasicMaterial({ 
-      color: 0x5e0000, 
+      color: 0x2a0000, 
       transparent: true, 
       opacity: 0.95, 
       depthWrite: false, 
@@ -2274,8 +2202,8 @@ export function Arena3D({
       boothWallGeo, shelfGeo, tagGeo, cloakGeo, hoodGeo, faceCavityGeo,
       eyeGeo, standGeo, drumGeo, rodGeo, cartridgeShellGeo, pointerConeGeo,
       frameGeo, gripGeo, cylDrumGeo, fluteGeo, barrelGeo, hammerGeo,
-      guardGeo, padGeo, etchGeo, unitBoxGeo, unitCircleGeo, unitSmokeSphereGeo,
-      unitShellCylinderGeo, unitBulletGeo, unitPixelSplatGeo
+      guardGeo, unitBoxGeo, unitCircleGeo, unitSmokeSphereGeo,
+      unitShellCylinderGeo, unitBulletGeo, unitPixelSplatGeo, unitQuadSplatGeo, unitHexSplatGeo, unitOctagonSplatGeo
     ]);
 
     const disposeNode = (obj: THREE.Object3D) => {
@@ -2355,7 +2283,6 @@ export function Arena3D({
 
         // Stamp interactive metadata on all sub-meshes for recursive hit validation
         itemObj.userData = { isPlayerItem: true, index: idx };
-        addRedOutline(itemObj);
 
         playerItemsGrp.add(itemObj);
         playerItemMeshes.push(itemObj);
@@ -2390,64 +2317,100 @@ export function Arena3D({
     const mouse = new THREE.Vector2();
     let hoveredMesh: THREE.Object3D | null = null;
 
-    // TEMP-DEBUG (remove): expose runtime scene state for CDP verification.
-    (window as any).__rr = {
-      scene,
-      camera,
-      ammoBlock,
-      get camPos() { return camera.position.toArray().map((n: number) => +n.toFixed(3)); },
-      get camVec() { return stateRef.current.camPosVec ? stateRef.current.camPosVec.toArray().map((n: number) => +n.toFixed(3)) : null; },
-      get look() { return stateRef.current.lookTargetVec ? stateRef.current.lookTargetVec.toArray().map((n: number) => +n.toFixed(3)) : null; },
-      get gun() {
-        gunGroup.updateMatrixWorld(true);
-        let yMin = 999;
-        gunGroup.traverse((c) => {
-          if (c instanceof THREE.Mesh) {
-            const b = new THREE.Box3().setFromObject(c);
-            yMin = Math.min(yMin, b.min.y);
-          }
-        });
-        return { pos: gunGroup.position.toArray().map((n: number) => +n.toFixed(3)), yMin: +yMin.toFixed(3) };
-      },
-      get ammoWorld() { ammoBlock.updateMatrixWorld(true); return ammoBlock.getWorldPosition(new THREE.Vector3()).toArray().map((n: number) => +n.toFixed(3)); },
-      get bullets() {
-        return ar.loadBullets.filter((b) => b.visible)
-          .map((b) => { const v = new THREE.Vector3(); b.getWorldPosition(v); return v.toArray().map((n: number) => +n.toFixed(2)); });
-      },
-      get dbg() {
-        return {
-          loadingSceneBuilt: ar.loadingSceneBuilt,
-          ammoVis: !!ammoBlock.visible,
-          dbgAmmoId: (ammoBlock as any).id,
-          blockDbgId: (window as any).__rrDbgAmmoId,
-          loadBulletsLen: ar.loadBullets.length,
-          bulletVis: ar.loadBullets.map((b) => b.visible),
-          filledSlots: ar.filledSlots,
-          phase: stateRef.current.loadingPhase,
-        };
-      },
-      get slot0() { if (ar.slotMarkers && ar.slotMarkers[0]) { const v = new THREE.Vector3(); ar.slotMarkers[0].getWorldPosition(v); return v.toArray().map((n: number) => +n.toFixed(2)); } return null; },
-      get spinW() { if (ar.spinZone) { const v = new THREE.Vector3(); ar.spinZone.getWorldPosition(v); return v.toArray().map((n: number) => +n.toFixed(2)); } return null; },
-      get state() { return { gameState: stateRef.current.gameState, phase: stateRef.current.loadingPhase, seeded: stateRef.current.bulletsInserted, target: stateRef.current.bulletTargetCount }; },
-      get stateVec3() { return { lookTargetVec: stateRef.current.lookTargetVec?.toArray().map((n: number) => +n.toFixed(2) as any) ?? null }; },
-    };
-
     const getRaycastTargets = () => {
       const list: THREE.Object3D[] = [];
-      if (playerSelfPad) list.push(playerSelfPad);
       list.push(dealerGroup);
       list.push(...playerItemMeshes);
       list.push(...shopItemMeshes);
-      if (stateRef.current.gameState === 'LOADING') {
-        if (stateRef.current.loadingPhase === 'pickup') {
-          list.push(...ar.loadBullets.filter((b) => b.visible));
-        } else if (ar.spinZone) {
-          list.push(ar.spinZone);
-        }
-      }
       return list;
     };
 
+
+    // --- INSTANCED LANDED BLOOD SYSTEM & PARTICLE POOLING ---
+    const MAX_LANDED_BLOOD = 4000;
+    const landedCoreBloodIM = new THREE.InstancedMesh(unitOctagonSplatGeo, sharedBloodMat, MAX_LANDED_BLOOD);
+    const landedDarkBloodIM = new THREE.InstancedMesh(unitBoxGeo, sharedDarkBloodMat, MAX_LANDED_BLOOD);
+    const landedBrightBloodIM = new THREE.InstancedMesh(unitBoxGeo, sharedBrightBloodMat, MAX_LANDED_BLOOD);
+
+    landedCoreBloodIM.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(MAX_LANDED_BLOOD * 3), 3);
+    landedDarkBloodIM.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(MAX_LANDED_BLOOD * 3), 3);
+    landedBrightBloodIM.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(MAX_LANDED_BLOOD * 3), 3);
+
+    landedCoreBloodIM.count = 0;
+    landedDarkBloodIM.count = 0;
+    landedBrightBloodIM.count = 0;
+
+    landedCoreBloodIM.receiveShadow = true;
+    landedDarkBloodIM.receiveShadow = true;
+    landedBrightBloodIM.receiveShadow = true;
+
+    landedCoreBloodIM.renderOrder = 5;
+    landedDarkBloodIM.renderOrder = 4;
+    landedBrightBloodIM.renderOrder = 6;
+
+    scene.add(landedCoreBloodIM);
+    scene.add(landedDarkBloodIM);
+    scene.add(landedBrightBloodIM);
+
+    let landedCoreCount = 0;
+    let landedDarkCount = 0;
+    let landedBrightCount = 0;
+
+    const dummyMatrix = new THREE.Matrix4();
+    const dummyQuat = new THREE.Quaternion();
+    const dummyEuler = new THREE.Euler();
+
+    const addLandedSplat = (
+      type: 'CORE' | 'DARK' | 'BRIGHT',
+      pos: THREE.Vector3,
+      rotY: number,
+      scale: THREE.Vector3,
+      colorHex: number = 0x2a0000
+    ) => {
+      dummyEuler.set(0, rotY, 0);
+      dummyQuat.setFromEuler(dummyEuler);
+      dummyMatrix.compose(pos, dummyQuat, scale);
+
+      const col = new THREE.Color(colorHex);
+
+      if (type === 'CORE' && landedCoreCount < MAX_LANDED_BLOOD) {
+        landedCoreBloodIM.setMatrixAt(landedCoreCount, dummyMatrix);
+        landedCoreBloodIM.setColorAt(landedCoreCount, col);
+        landedCoreCount++;
+        landedCoreBloodIM.count = landedCoreCount;
+        landedCoreBloodIM.instanceMatrix.needsUpdate = true;
+        if (landedCoreBloodIM.instanceColor) landedCoreBloodIM.instanceColor.needsUpdate = true;
+      } else if (type === 'DARK' && landedDarkCount < MAX_LANDED_BLOOD) {
+        landedDarkBloodIM.setMatrixAt(landedDarkCount, dummyMatrix);
+        landedDarkBloodIM.setColorAt(landedDarkCount, col);
+        landedDarkCount++;
+        landedDarkBloodIM.count = landedDarkCount;
+        landedDarkBloodIM.instanceMatrix.needsUpdate = true;
+        if (landedDarkBloodIM.instanceColor) landedDarkBloodIM.instanceColor.needsUpdate = true;
+      } else if (type === 'BRIGHT' && landedBrightCount < MAX_LANDED_BLOOD) {
+        landedBrightBloodIM.setMatrixAt(landedBrightCount, dummyMatrix);
+        landedBrightBloodIM.setColorAt(landedBrightCount, col);
+        landedBrightCount++;
+        landedBrightBloodIM.count = landedBrightCount;
+        landedBrightBloodIM.instanceMatrix.needsUpdate = true;
+        if (landedBrightBloodIM.instanceColor) landedBrightBloodIM.instanceColor.needsUpdate = true;
+      }
+    };
+
+    // Pre-allocated object pool for airborne blood particle meshes
+    const airborneBloodPool: THREE.Mesh[] = [];
+    const getAirborneBloodMesh = (size: number, bloodMat: THREE.Material): THREE.Mesh => {
+      let m = airborneBloodPool.pop();
+      const matToUse = bloodMat === sharedBloodMat ? sharedAirborneBloodMat : bloodMat;
+      if (!m) {
+        m = new THREE.Mesh(unitBoxGeo, matToUse);
+      } else {
+        m.material = matToUse;
+        m.visible = true;
+      }
+      m.userData = { size, isPooled: true };
+      return m;
+    };
 
     // --- PARTICLES SPARK EMITTER SYSTEM ---
     const activeParticles: {
@@ -2462,6 +2425,55 @@ export function Arena3D({
       bounceCount: number;
     }[] = [];
 
+    const clearBloodSplatters = () => {
+      sharedBloodMat.opacity = 1.0;
+      sharedDarkBloodMat.opacity = 1.0;
+      sharedBrightBloodMat.opacity = 1.0;
+      sharedAirborneBloodMat.opacity = 1.0;
+      
+      // 1. Reset instanced landed blood counts
+      landedCoreCount = 0;
+      landedDarkCount = 0;
+      landedBrightCount = 0;
+      landedCoreBloodIM.count = 0;
+      landedDarkBloodIM.count = 0;
+      landedBrightBloodIM.count = 0;
+      landedCoreBloodIM.instanceMatrix.needsUpdate = true;
+      landedDarkBloodIM.instanceMatrix.needsUpdate = true;
+      landedBrightBloodIM.instanceMatrix.needsUpdate = true;
+
+      // 2. Remove all active airborne blood particles and return to pool
+      for (let i = activeParticles.length - 1; i >= 0; i--) {
+        const pt = activeParticles[i];
+        if (pt.type === 'BLOOD' || pt.type === 'LIQUID') {
+          if (pt.mesh) {
+            if (pt.mesh.parent) pt.mesh.parent.remove(pt.mesh);
+            if (pt.mesh.userData?.isPooled) {
+              pt.mesh.visible = false;
+              airborneBloodPool.push(pt.mesh);
+            } else {
+              disposeNode(pt.mesh);
+            }
+          }
+          activeParticles.splice(i, 1);
+        }
+      }
+
+      // 3. Clean up camera lens attached splats
+      if (camera.children.length > 0) {
+        const camChildren = [...camera.children];
+        camChildren.forEach((child) => {
+          if (child instanceof THREE.Mesh && child.userData?.isCameraSplat) {
+            camera.remove(child);
+            disposeNode(child);
+          }
+        });
+      }
+
+      // 4. Reset 2D UI screen splat overlays
+      setScreenSplats([]);
+    };
+
     const spawnParticles = (
       origin: THREE.Vector3,
       particleColor: number,
@@ -2470,24 +2482,36 @@ export function Arena3D({
       gravityFactor = 0.003,
       type: 'BLOOD' | 'SPARK' | 'SMOKE' | 'SHELL' | 'DEBRIS' | 'LIQUID' | 'BULLET' = 'SPARK'
     ) => {
-      // Psychological horror blood is ALWAYS enabled for gritty aesthetic
-      const isBloodEnabled = true;
+      const ctrlSettings = getControllerSettings();
+      const isBloodEnabled = ctrlSettings.bloodEffectsEnabled !== false;
 
       // Particle Quality Density Multiplier
-      const pQuality = getControllerSettings().particleQuality || 'high';
+      const pQuality = ctrlSettings.particleQuality || 'high';
       let pMult = 1.0;
       switch (pQuality) {
         case 'off': pMult = 0.0; break;
         case 'low': pMult = 0.25; break;
-        case 'medium': pMult = 0.5; break;
+        case 'medium': pMult = 0.50; break;
         case 'high': pMult = 1.0; break;
         case 'ultra': pMult = 1.75; break;
       }
 
-      if (count > 1) {
-        count = Math.round(count * pMult);
-      } else if (pMult === 0 && type !== 'SHELL' && type !== 'BULLET') {
-        count = 0;
+      if (type === 'BLOOD') {
+        if (!isBloodEnabled) return;
+        particleColor = 0x2a0000;
+        if (count <= 0) count = 1;
+      } else if (type === 'SMOKE') {
+        if (pMult === 0) return;
+        count = Math.max(1, Math.min(18, Math.round(count * Math.min(1.25, pMult))));
+      } else {
+        // Non-blood particles (SPARK, DEBRIS, LIQUID) obey settings
+        if (pMult === 0) {
+          if (type !== 'SHELL' && type !== 'BULLET') {
+            return;
+          }
+        } else {
+          count = Math.max(1, Math.round(count * pMult));
+        }
       }
 
       if (count <= 0) return;
@@ -2496,25 +2520,23 @@ export function Arena3D({
       if (type === 'BLOOD' && count >= 125) {
         const splatCount = 18 + Math.floor(Math.random() * 14);
         for (let s = 0; s < splatCount; s++) {
-          // Pixelated step scale on screen glass
           const pxStep = 0.003;
           const pxSize = (1 + Math.floor(Math.random() * 3)) * pxStep;
           const splatMesh = new THREE.Mesh(unitPixelSplatGeo, sharedSplatMat);
           const pxWidth = pxSize * (1 + Math.floor(Math.random() * 3));
           const pxHeight = pxSize * (1 + Math.floor(Math.random() * 3));
           splatMesh.scale.set(pxWidth, pxHeight, 1);
-          splatMesh.userData = { initialScaleX: pxWidth, initialScaleY: pxHeight };
+          splatMesh.userData = { initialScaleX: pxWidth, initialScaleY: pxHeight, isCameraSplat: true };
           
-          // Position directly on camera lens
+          // Position directly on camera lens in discrete pixel steps
           const rx = Math.floor((Math.random() - 0.5) * 16) * 0.012;
           const ry = Math.floor((Math.random() - 0.5) * 12) * 0.01;
           splatMesh.position.set(rx, ry, -0.11);
-          // 90-degree pixel angular rotation snaps
           splatMesh.rotation.z = Math.floor(Math.random() * 4) * (Math.PI / 2);
           
           camera.add(splatMesh);
           
-          // Register splat to slide down and stretch vertically in pixelated steps
+          // Register splat to slide down in pixelated steps
           const splatMaxLife = 160 + Math.random() * 200;
           activeParticles.push({
             mesh: splatMesh,
@@ -2522,7 +2544,7 @@ export function Arena3D({
             life: 0,
             maxLife: splatMaxLife,
             gravity: 0,
-            type: 'DEBRIS',
+            type: 'BLOOD',
             hasLanded: true,
             bounceCount: 0
           });
@@ -2542,16 +2564,9 @@ export function Arena3D({
             const stepCount = 1 + Math.floor(Math.random() * 4); // 0.008, 0.016, 0.024, 0.032
             const size = stepCount * pxStep;
             
-            // Randomly select between arterial red, congealed dark crimson, and vivid bright red flat-shaded materials
-            const matChoice = Math.random();
-            const bloodMat = matChoice < 0.45 
-              ? sharedBloodMat 
-              : (matChoice < 0.8 ? sharedDarkBloodMat : sharedBrightBloodMat);
-
-            mesh = new THREE.Mesh(unitBoxGeo, bloodMat);
-            mesh.userData = { size, initialMat: bloodMat };
+            const bloodMat = sharedBloodMat;
+            mesh = getAirborneBloodMesh(size, bloodMat);
             
-            // Randomize pixelated voxel shapes: Standard pixel drops vs elongated pixelated flesh chunks
             const isFleshChunk = Math.random() < 0.35;
             if (isFleshChunk) {
               const chunkLen = (2 + Math.floor(Math.random() * 4)) * pxStep;
@@ -2567,13 +2582,14 @@ export function Arena3D({
               Math.floor(Math.random() * 4) * (Math.PI / 2)
             );
 
-            maxLife = 220 + Math.random() * 200;
+            maxLife = 1200 + Math.random() * 600;
             break;
           }
           case 'SPARK': {
             const size = 0.015 + Math.random() * 0.02;
             mesh = new THREE.Mesh(unitBoxGeo, sharedSparkMat);
             mesh.scale.set(size, size, size * 2);
+            mesh.renderOrder = 10;
             maxLife = 10 + Math.random() * 15;
             gravity = 0.001; 
             break;
@@ -2599,25 +2615,39 @@ export function Arena3D({
           case 'SMOKE': {
             const isHighSettings = getControllerSettings().postProcessing === 'high' || getControllerSettings().postProcessing === 'cinematic';
             const size = isHighSettings
-              ? 0.032 + Math.random() * 0.048
+              ? 0.035 + Math.random() * 0.045
               : 0.024 + Math.random() * 0.032;
+
+            const baseMat = isHighSettings ? sharedHighSmokeMat : sharedSmokeMat;
+            const smokeMat = baseMat.clone();
+            if (particleColor && particleColor !== 0xffcc00 && particleColor !== 0xaaaaaa) {
+              smokeMat.color.setHex(particleColor);
+            }
+
+            const baseOpacity = isHighSettings ? 0.12 : 0.20;
+            smokeMat.opacity = 0; // Starts transparent, fades in smoothly
+            smokeMat.transparent = true;
+            smokeMat.depthWrite = false;
 
             mesh = new THREE.Mesh(
               isHighSettings ? unitSmokeSphereGeo : unitBoxGeo, 
-              isHighSettings ? sharedHighSmokeMat : sharedSmokeMat
+              smokeMat
             );
+            mesh.renderOrder = 10; // Render above blood splatters on table
+
             
-            const sx = size * (0.8 + Math.random() * 0.4);
-            const sy = size * (0.8 + Math.random() * 0.4);
-            const sz = size * (0.8 + Math.random() * 0.4);
+            const sx = size * (0.85 + Math.random() * 0.3);
+            const sy = size * (0.85 + Math.random() * 0.3);
+            const sz = size * (0.85 + Math.random() * 0.3);
             mesh.scale.set(sx, sy, sz);
             mesh.userData = { 
               initialScaleX: sx, 
               initialScaleY: sy, 
               initialScaleZ: sz,
-              rotSpeedX: (Math.random() - 0.5) * 0.04,
-              rotSpeedY: (Math.random() - 0.5) * 0.04,
-              rotSpeedZ: (Math.random() - 0.5) * 0.04
+              baseOpacity,
+              rotSpeedX: (Math.random() - 0.5) * 0.03,
+              rotSpeedY: (Math.random() - 0.5) * 0.03,
+              rotSpeedZ: (Math.random() - 0.5) * 0.03
             };
             mesh.rotation.set(
               Math.random() * Math.PI,
@@ -2626,14 +2656,16 @@ export function Arena3D({
             );
             
             maxLife = isHighSettings 
-              ? 135 + Math.random() * 65 
-              : 100 + Math.random() * 45; // ~2 seconds life span
-            gravity = -0.0006 - Math.random() * 0.0005; // thermal convective buoyant upward draft!
+              ? 120 + Math.random() * 60 
+              : 80 + Math.random() * 40;
+            gravity = -0.0004 - Math.random() * 0.0004; // Gentle thermal upward draft
             break;
           }
           case 'LIQUID': {
             const size = 0.015 + Math.random() * 0.02;
-            mesh = new THREE.Mesh(unitBoxGeo, sharedLiquidMat);
+            const mat = sharedLiquidMat.clone();
+            mat.color.setHex(particleColor);
+            mesh = new THREE.Mesh(unitBoxGeo, mat);
             mesh.scale.set(size, size, size);
             maxLife = 60 + Math.random() * 30;
             gravity = 0.0015; // Positive gravity so it falls into mouth/down
@@ -2657,9 +2689,11 @@ export function Arena3D({
           : (type === 'SMOKE' ? (0.02 + Math.random() * 0.15) : (type === 'LIQUID' ? 0.05 + Math.random() * 0.05 : Math.random() - 0.5));
         
         let velocity = new THREE.Vector3(
-          Math.cos(angle) * spread * speed,
-          (Math.random() - 0.15) * speed * 2.0 + (type === 'BLOOD' ? 0.18 : (type === 'SMOKE' ? 0.005 : (type === 'LIQUID' ? -0.1 : 0.05))),
-          Math.sin(angle) * spread * speed
+          Math.cos(angle) * spread * speed * 1.5,
+          type === 'BLOOD'
+            ? (Math.random() - 0.70) * speed * 1.8 - 0.08
+            : (Math.random() - 0.15) * speed * 2.0 + (type === 'SMOKE' ? 0.005 : (type === 'LIQUID' ? -0.1 : 0.05)),
+          Math.sin(angle) * spread * speed * 1.5
         );
 
         if (type === 'SHELL') {
@@ -2733,7 +2767,7 @@ export function Arena3D({
 
 
     // --- ANIMATION / INTERACTION STATES moved to animRef ---
-    // Fixtures created earlier (drum spin proxy, load bullets) already use 'ar'.
+    const ar = animRef.current;
 
     // Table resting coordinates: physically resting flat on its side on the table surface
     const initialGunPos = new THREE.Vector3(0, 0.57, -0.4);
@@ -2742,7 +2776,7 @@ export function Arena3D({
     gunGroup.rotation.copy(initialGunRot);
 
     // Grid Scaling layout handlers
-    const handleResize = () => {
+    handleResize = () => {
       if (!renderer) return;
       const w = container.clientWidth;
       const h = container.clientHeight;
@@ -2775,17 +2809,26 @@ export function Arena3D({
       const rcasSharpness = Math.max(0.0, (1.0 - sharpening) * 1.8);
 
       if (renderPipeline && scenePass) {
-        try {
-          if (upscalingPreset !== 'off') {
-            renderPipeline.outputNode = fsr1(scenePass, rcasSharpness);
-          } else if (sharpening > 0) {
-            renderPipeline.outputNode = sharpen(scenePass, rcasSharpness);
-          } else {
+        const postKey = `${upscalingPreset}_${sharpening}_${rcasSharpness.toFixed(2)}`;
+        if (postKey !== currentPostprocessingKey) {
+          currentPostprocessingKey = postKey;
+          try {
+            if (currentPostprocessingNode && currentPostprocessingNode !== scenePass && typeof currentPostprocessingNode.dispose === 'function') {
+              try { currentPostprocessingNode.dispose(); } catch (e) {}
+            }
+            if (upscalingPreset !== 'off') {
+              currentPostprocessingNode = fsr1(scenePass, rcasSharpness);
+            } else if (sharpening > 0) {
+              currentPostprocessingNode = sharpen(scenePass, rcasSharpness);
+            } else {
+              currentPostprocessingNode = scenePass;
+            }
+            renderPipeline.outputNode = currentPostprocessingNode;
+            renderPipeline.needsUpdate = true;
+          } catch (e) {
+            console.warn('FSR 1.0 / RCAS postprocessing node error:', e);
             renderPipeline.outputNode = scenePass;
           }
-          renderPipeline.needsUpdate = true;
-        } catch (e) {
-          console.warn('FSR 1.0 / RCAS postprocessing node error:', e);
         }
       }
 
@@ -2793,23 +2836,23 @@ export function Arena3D({
       renderer.shadowMap.enabled = !isMobileDevice && graphics.shadowQuality !== 'low';
       
       if (!isMobileDevice) {
-         if (graphics.shadowQuality === 'high' || graphics.shadowQuality === 'ultra') {
-             renderer.shadowMap.type = THREE.PCFShadowMap; // PCFSoftShadowMap is deprecated, and PCF is the general standard now
-         } else {
-             renderer.shadowMap.type = THREE.PCFShadowMap;
-         }
+         renderer.shadowMap.type = THREE.PCFShadowMap;
       }
 
       scene.traverse((child) => {
          // Shadow maps on lights
          if (child instanceof THREE.SpotLight || child instanceof THREE.PointLight || child instanceof THREE.DirectionalLight) {
-           child.castShadow = (!isMobileDevice && graphics.shadowQuality !== 'low');
-           if (child.castShadow && graphics.shadowQuality === 'ultra') {
-              child.shadow.mapSize.width = 2048;
-              child.shadow.mapSize.height = 2048;
-           } else if (child.castShadow) {
-              child.shadow.mapSize.width = 512;
-              child.shadow.mapSize.height = 512;
+           const enableShadow = (!isMobileDevice && graphics.shadowQuality !== 'low');
+           child.castShadow = enableShadow;
+           if (enableShadow) {
+             const targetSize = (graphics.shadowQuality === 'ultra') ? 2048 : 512;
+             if (child.shadow.mapSize.width !== targetSize || child.shadow.mapSize.height !== targetSize) {
+                child.shadow.mapSize.set(targetSize, targetSize);
+                if (child.shadow.map) {
+                   try { child.shadow.map.dispose(); } catch (e) {}
+                   child.shadow.map = null;
+                }
+             }
            }
          }
          
@@ -2847,10 +2890,10 @@ export function Arena3D({
       }
     };
 
-    handleResize();
+    if (handleResize) handleResize();
 
     const resizeObserver = new ResizeObserver(() => {
-      handleResize();
+      if (handleResize) handleResize();
     });
     resizeObserver.observe(container);
 
@@ -2858,7 +2901,7 @@ export function Arena3D({
     import('../controller').then(({ subscribeControllerSettings }) => {
       subscribeControllerSettings((s) => {
          // Re-apply and re-render every time settings update
-         handleResize();
+         if (handleResize) handleResize();
          setDebugToggle(p => p + 1);
       });
     });
@@ -2880,8 +2923,6 @@ export function Arena3D({
           if (
             curr.userData &&
             (curr.userData.isPlayerItem ||
-              curr.userData.isShootSelfButton ||
-              curr.userData.isShootDealerButton ||
               curr.userData.isShopItem)
           ) {
             return curr;
@@ -2903,19 +2944,7 @@ export function Arena3D({
       if (target) {
         document.body.style.cursor = 'pointer';
 
-        if (target.userData.isLoadBullet) {
-          setHoveredInfo({
-            type: 'LOAD_BULLET',
-            name: 'ROUND',
-            description: 'CLICK A ROUND AND DRAG IT INTO AN OPEN CYLINDER CHAMBER.',
-          });
-        } else if (target.userData.isSpinZone) {
-          setHoveredInfo({
-            type: 'SPIN',
-            name: 'CYLINDER',
-            description: 'CLICK AND DRAG ACROSS THE CYLINDER TO SPIN IT. WATCH THE CHAMBERS RATCHET.',
-          });
-        } else if (target.userData.isPlayerItem) {
+        if (target.userData.isPlayerItem) {
           const idx = target.userData.index;
           const userItemsArr = stateRef.current.player.items;
           const itemName = userItemsArr[idx];
@@ -2926,18 +2955,6 @@ export function Arena3D({
             name: itemName,
             description: itemDesc,
             index: idx,
-          });
-        } else if (target.userData.isShootSelfButton) {
-          setHoveredInfo({
-            type: 'SHOOT_SELF',
-            name: 'SHOOT SELF',
-            description: 'POINT THE REVOLVER DIRECTLY AT YOUR TEMPLE. IF IT IS A BLANK, YOU RETAIN YOUR TURN.',
-          });
-        } else if (target.userData.isShootDealerButton) {
-          setHoveredInfo({
-            type: 'SHOOT_DEALER',
-            name: 'SHOOT DEALER',
-            description: 'AIM AT THE HOODED DEALER. DEALS LETHAL IMPACT UPON PROPELLANT SHELL FIRE.',
           });
         } else if (target.userData.isShopItem) {
            const { type, cost } = target.userData;
@@ -2988,12 +3005,6 @@ export function Arena3D({
           const idx = target.userData.index;
           useItem(idx, 'player');
           setHoveredInfo(null);
-        } else if (target.userData.isShootSelfButton && stateRef.current.showControls) {
-          fireGun('player', 'player');
-          setHoveredInfo(null);
-        } else if (target.userData.isShootDealerButton && stateRef.current.showControls) {
-          fireGun('dealer', 'player');
-          setHoveredInfo(null);
         } else if (target.userData.isShopItem) {
            const { type, cost } = target.userData;
            if (stateRef.current.bloodCurrency >= cost && stateRef.current.player.items.length < 8) {
@@ -3017,204 +3028,6 @@ export function Arena3D({
       }
       if (updateGamepads() !== null) return;
       handleMouseUpRaw(e.clientX, e.clientY);
-      finalizeLoadingDrag(e.clientX, e.clientY);
-    };
-
-    // --- INTERACTIVE MANUAL LOADING DRAG & DROP (bullets + cylinder spin) ---
-    const setBulletWorld = (bullet: THREE.Group, worldPos: THREE.Vector3) => {
-      ammoBlock.updateMatrixWorld(true);
-      bullet.position.copy(ammoBlock.worldToLocal(worldPos.clone()));
-    };
-
-    const getPointerRay = (clientX: number, clientY: number) => {
-      const rect = canvas.getBoundingClientRect();
-      mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
-      mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
-      raycaster.setFromCamera(mouse, camera);
-      return raycaster.ray;
-    };
-
-    // World point of the cylinder axis (center of the chamber ring).
-    const getCylinderAxisWorld = () => {
-      const v = new THREE.Vector3();
-      if (ar.spinProxy) ar.spinProxy.getWorldPosition(v);
-      return v;
-    };
-
-    const getPointerAngleAroundAxis = (clientX: number, clientY: number) => {
-      const ray = getPointerRay(clientX, clientY);
-      const axis = getCylinderAxisWorld();
-      const ref = new THREE.Vector3();
-      if (ar.slotMarkers[0]) ar.slotMarkers[0].getWorldPosition(ref);
-      const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(new THREE.Vector3(0, 1, 0), ref);
-      const pt = new THREE.Vector3();
-      ray.intersectPlane(plane, pt);
-      return Math.atan2(pt.x - axis.x, pt.z - axis.z);
-    };
-
-    const updateCarriedBullet = (clientX: number, clientY: number) => {
-      const latest = stateRef.current;
-      if (latest.gameState !== 'LOADING' || latest.loadingPhase !== 'pickup') return;
-      const bullet = ar.loadBullets[ar.carriedBulletIdx];
-      if (!bullet) return;
-
-      const ray = getPointerRay(clientX, clientY);
-      const camDir = new THREE.Vector3();
-      camera.getWorldDirection(camDir);
-      const axis = getCylinderAxisWorld();
-      const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(camDir.clone().negate(), axis);
-      const pt = new THREE.Vector3();
-      if (!ray.intersectPlane(plane, pt)) return;
-
-      // Hold the round at arm's reach in front of the camera ray.
-      setBulletWorld(bullet, pt.clone().addScaledVector(camDir, 0.18));
-      bullet.rotation.z = Math.sin(performance.now() / 70) * 0.05;
-      bullet.rotation.y = 0;
-
-      // Nearest open chamber mouth becomes the highlight target.
-      let best = -1;
-      let bestD = 0.17;
-      ar.slotMarkers.forEach((m, i) => {
-        if (ar.filledSlots[i]) return;
-        const wp = new THREE.Vector3();
-        m.getWorldPosition(wp);
-        const d = wp.distanceTo(pt);
-        if (d < bestD) {
-          bestD = d;
-          best = i;
-        }
-      });
-      ar.highlightedSlot = best;
-    };
-
-    const placeHighlight = () => {
-      if (!ar.slotHighlight) return;
-      if (ar.highlightedSlot >= 0 && !ar.filledSlots[ar.highlightedSlot]) {
-        const marker = ar.slotMarkers[ar.highlightedSlot];
-        ar.slotHighlight.position.copy(marker.position);
-        ar.slotHighlight.position.z += 0.035;
-        ar.slotHighlight.visible = true;
-      } else {
-        ar.slotHighlight.visible = false;
-      }
-    };
-
-    const dropCarriedBullet = (clientX: number, clientY: number) => {
-      const latest = stateRef.current;
-      const bullet = ar.loadBullets[ar.carriedBulletIdx];
-      ar.highlightedSlot = -1;
-      if (ar.slotHighlight) ar.slotHighlight.visible = false;
-      ar.carriedBulletIdx = -1;
-
-      if (!bullet || !bullet.visible) return;
-
-      // Raycast the drop point (mouseup may be over the cylinder holes).
-      updateCarriedBullet(clientX, clientY);
-      const dropIdx = ar.highlightedSlot;
-      ar.highlightedSlot = -1;
-      if (ar.slotHighlight) ar.slotHighlight.visible = false;
-      if (latest.gameState === 'LOADING' && latest.loadingPhase === 'pickup' && dropIdx >= 0) {
-        const marker = ar.slotMarkers[dropIdx];
-        const target = new THREE.Vector3();
-        marker.getWorldPosition(target);
-        const axis = new THREE.Vector3();
-        marker.getWorldDirection(axis); // points out of the chamber mouth
-        ar.filledSlots[dropIdx] = true;
-        const finalPos = target.clone().addScaledVector(axis, -0.20);
-        ar.insertAnims.push({ bullet, from: bullet.position.clone(), to: ammoBlock.worldToLocal(finalPos.clone()), t: 0 });
-        playBulletLoad();
-        spawnParticles(target, 0xffcc00, 6, 0.06, 0.002, 'SPARK');
-        vibrateGamepad('jolt', { duration: 45, weak: 0.1, strong: 0.9 });
-        onBulletInserted();
-      } else {
-        ar.returnAnims.push({ bullet, from: bullet.position.clone(), to: blockSlotLocal(bullet.userData.bulletIdx ?? 0), t: 0 });
-      }
-    };
-
-    const blockSlotLocal = (i: number) =>
-      new THREE.Vector3(-0.135 + i * 0.054, 0.135, 0);
-
-    const updateSpinGesture = (clientX: number, clientY: number) => {
-      const latest = stateRef.current;
-      if (latest.gameState !== 'LOADING' || latest.loadingPhase !== 'spin') return;
-      const angle = getPointerAngleAroundAxis(clientX, clientY);
-      const now = performance.now();
-      const dt = Math.max(0.001, (now - ar.spinLastTime) / 1000);
-      let delta = angle - ar.spinLastAngle;
-      while (delta > Math.PI) delta -= Math.PI * 2;
-      while (delta < -Math.PI) delta += Math.PI * 2;
-      const instVel = delta / dt;
-      ar.spinAngle += delta;
-      ar.spinVel = ar.spinVel * 0.6 + instVel * 0.4;
-      ar.spinLastAngle = angle;
-      ar.spinLastTime = now;
-      if (ar.spinProxy) ar.spinProxy.rotation.z = ar.spinAngle;
-    };
-
-    const windowDragMove = (e: MouseEvent) => {
-      if (ar.isDraggingBullet) {
-        updateCarriedBullet(e.clientX, e.clientY);
-        placeHighlight();
-      } else if (ar.spinGestureActive) {
-        updateSpinGesture(e.clientX, e.clientY);
-      }
-    };
-
-    const finalizeLoadingDrag = (clientX: number, clientY: number) => {
-      if (ar.isDraggingBullet) {
-        ar.isDraggingBullet = false;
-        dropCarriedBullet(clientX, clientY);
-      }
-      if (ar.spinGestureActive) {
-        ar.spinGestureActive = false;
-        ar.spinLastTime = performance.now();
-      }
-      ar.dragLastPoint = null;
-      window.removeEventListener('mousemove', windowDragMove);
-      window.removeEventListener('mouseup', finalizeLoadingDragEvent);
-    };
-
-    const finalizeLoadingDragEvent = (e: MouseEvent) => {
-      finalizeLoadingDrag(e.clientX, e.clientY);
-    };
-
-    const handleMouseDown = (e: MouseEvent) => {
-      const latest = stateRef.current;
-      if (latest.gameState !== 'LOADING' || latest.showControls) return;
-      if (ar.isDraggingBullet || ar.spinGestureActive) return;
-
-      if (latest.loadingPhase === 'pickup') {
-        const t = getIntersectionTargetRaw(e.clientX, e.clientY);
-        let bulletGroup: THREE.Group | null = null;
-        let cur: THREE.Object3D | null = t;
-        while (cur && cur !== scene) {
-          if (cur.userData && cur.userData.isLoadBullet) {
-            bulletGroup = cur as THREE.Group;
-            break;
-          }
-          cur = cur.parent;
-        }
-        if (bulletGroup && bulletGroup.visible) {
-          ar.carriedBulletIdx = bulletGroup.userData.bulletIdx ?? 0;
-          ar.isDraggingBullet = true;
-          ar.highlightedSlot = -1;
-          vibrateGamepad('click');
-          window.addEventListener('mousemove', windowDragMove);
-          window.addEventListener('mouseup', finalizeLoadingDragEvent);
-        }
-      } else if (latest.loadingPhase === 'spin') {
-        const t = getIntersectionTargetRaw(e.clientX, e.clientY);
-        if (t && t.userData && t.userData.isSpinZone) {
-          ar.spinGestureActive = true;
-          ar.spinSettled = false;
-          const angle = getPointerAngleAroundAxis(e.clientX, e.clientY);
-          ar.spinLastAngle = angle;
-          ar.spinLastTime = performance.now();
-          vibrateGamepad('click');
-          window.addEventListener('mousemove', windowDragMove);
-          window.addEventListener('mouseup', finalizeLoadingDragEvent);
-        }
-      }
     };
 
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -3314,7 +3127,7 @@ export function Arena3D({
         const allTargets = getRaycastTargets();
         
         let targets = allTargets.filter(t => 
-          isLookingAtShopRef.current ? t.userData.isShopItem : (t.userData.isPlayerItem || t.userData.isShootSelfButton || t.userData.isShootDealerButton)
+          isLookingAtShopRef.current ? t.userData.isShopItem : t.userData.isPlayerItem
         );
 
         targets.sort((a, b) => {
@@ -3348,18 +3161,6 @@ export function Arena3D({
                 description: itemDesc,
                 index: idx,
               });
-            } else if (target.userData.isShootSelfButton) {
-              setHoveredInfo({
-                type: 'SHOOT_SELF',
-                name: 'SHOOT SELF [S / ←]',
-                description: 'POINT THE REVOLVER DIRECTLY AT YOUR TEMPLE. IF IT IS A BLANK, YOU RETAIN YOUR TURN.',
-              });
-            } else if (target.userData.isShootDealerButton) {
-              setHoveredInfo({
-                type: 'SHOOT_DEALER',
-                name: 'SHOOT DEALER [D / →]',
-                description: 'AIM AT THE HOODED DEALER. DEALS LETHAL IMPACT UPON PROPELLANT SHELL FIRE.',
-              });
             } else if (target.userData.isShopItem) {
               const { type, cost } = target.userData;
               const isAffordable = latest.bloodCurrency >= cost;
@@ -3386,16 +3187,6 @@ export function Arena3D({
             setHoveredInfo(null);
             vibrateGamepad('click');
             return;
-          } else if (hoveredMesh.userData.isShootSelfButton && latest.showControls) {
-            fireGun('player', 'player');
-            setHoveredInfo(null);
-            vibrateGamepad('click');
-            return;
-          } else if (hoveredMesh.userData.isShootDealerButton && latest.showControls) {
-            fireGun('dealer', 'player');
-            setHoveredInfo(null);
-            vibrateGamepad('click');
-            return;
           } else if (hoveredMesh.userData.isShopItem) {
             const { type, cost } = hoveredMesh.userData;
             if (latest.bloodCurrency >= cost && latest.player.items.length < 8) {
@@ -3418,7 +3209,6 @@ export function Arena3D({
 
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mouseup', handleMouseUp);
-    window.addEventListener('mousedown', handleMouseDown);
     window.addEventListener('keydown', handleKeyDown);
 
 
@@ -3445,7 +3235,7 @@ export function Arena3D({
     let lastFrameTime = performance.now();
 
     const animate = () => {
-      if (webGpuErrorRef.current && (window as any).__rrForceRun !== true) {
+      if (webGpuErrorRef.current) {
         return; // Halt render engine immediately if WebGPU is unavailable
       }
       frameId = requestAnimationFrame(animate);
@@ -3469,6 +3259,21 @@ export function Arena3D({
       };
 
       const latest = stateRef.current;
+
+      if (ar.isFadingBlood) {
+        ar.bloodFadeTimer += rawDt;
+        const fadeDuration = 2.0; // 2 seconds fade out
+        if (ar.bloodFadeTimer >= fadeDuration) {
+          ar.isFadingBlood = false;
+          clearBloodSplatters();
+        } else {
+          const fadeOpacity = 1.0 - (ar.bloodFadeTimer / fadeDuration);
+          sharedBloodMat.opacity = fadeOpacity;
+          sharedDarkBloodMat.opacity = fadeOpacity;
+          sharedBrightBloodMat.opacity = fadeOpacity;
+          sharedAirborneBloodMat.opacity = fadeOpacity;
+        }
+      }
 
       // Calculate frame-to-frame barrel/muzzle position delta for realistic fluid continuation
       gunGroup.updateMatrixWorld(true);
@@ -3656,18 +3461,6 @@ export function Arena3D({
                   description: itemDesc,
                   index: idx,
                 });
-              } else if (target.userData.isShootSelfButton) {
-                setHoveredInfo({
-                  type: 'SHOOT_SELF',
-                  name: 'SHOOT SELF',
-                  description: 'POINT THE REVOLVER DIRECTLY AT YOUR TEMPLE. IF IT IS A BLANK, YOU RETAIN YOUR TURN.',
-                });
-              } else if (target.userData.isShootDealerButton) {
-                setHoveredInfo({
-                  type: 'SHOOT_DEALER',
-                  name: 'SHOOT DEALER',
-                  description: 'AIM AT THE HOODED DEALER. DEALS LETHAL IMPACT UPON PROPELLANT SHELL FIRE.',
-                });
               } else if (target.userData.isShopItem) {
                  const { type, cost } = target.userData;
                  const isAffordable = latest.bloodCurrency >= cost;
@@ -3685,13 +3478,7 @@ export function Arena3D({
                if (target.userData.isPlayerItem && latest.showControls) {
                  useItem(target.userData.index, 'player');
                  setHoveredInfo(null);
-               } else if (target.userData.isShootSelfButton && latest.showControls) {
-                 fireGun('player', 'player');
-                 setHoveredInfo(null);
-               } else if (target.userData.isShootDealerButton && latest.showControls) {
-                 fireGun('dealer', 'player');
-                 setHoveredInfo(null);
-} else if (target.userData.isShopItem && stateRef.current.showControls) {
+               } else if (target.userData.isShopItem) {
                  const { type, cost } = target.userData;
                  if (latest.bloodCurrency >= cost && latest.player.items.length < 8) {
                     buyItem(type, cost);
@@ -3711,6 +3498,27 @@ export function Arena3D({
         }
       } else {
         if (cursorEl) cursorEl.style.display = 'none';
+      }
+
+      // Game round state changes & blood clearing
+      if (latest.gameState !== ar.previousGameState) {
+        if (
+          latest.gameState === 'LOADING' ||
+          latest.gameState === 'MENU' ||
+          latest.gameState === 'ROUND_OVER'
+        ) {
+          const isCylinderReload = ar.previousGameState === 'ROUND_OVER';
+          const isNextRoundAfterWin = ar.previousGameState === 'GAME_OVER' && latest.roundsSurvived > 0;
+          const isFadingTransition = isCylinderReload || isNextRoundAfterWin;
+
+          if (latest.gameState === 'LOADING' && isFadingTransition) {
+            ar.isFadingBlood = true;
+            ar.bloodFadeTimer = 0;
+          } else {
+            clearBloodSplatters();
+          }
+        }
+        ar.previousGameState = latest.gameState;
       }
 
       // Rebuild components detection
@@ -3782,14 +3590,9 @@ export function Arena3D({
         stateRef.current.camPosVec = dealerCamPos.clone();
       }
       
-      // During LOADING the interactive bench close-up owns the camera
-      // (position + look target) — the default arena lerps would fight it
-      // and the view would shake / never reach the bench.
-      if (latest.gameState !== 'LOADING') {
-        const lerpSpeed = isLookingAtShopRef.current ? 0.14 : 0.20;
-        stateRef.current.lookTargetVec.lerp(activeLookTarget, damp(lerpSpeed));
-        stateRef.current.camPosVec.lerp(activeCamPos, damp(lerpSpeed));
-      }
+      const lerpSpeed = isLookingAtShopRef.current ? 0.14 : 0.20;
+      stateRef.current.lookTargetVec.lerp(activeLookTarget, damp(lerpSpeed));
+      stateRef.current.camPosVec.lerp(activeCamPos, damp(lerpSpeed));
 
       // Check if the gun barrel needs to show as cutoff/shortened (double damage)
       if (latest.doubleDamageActive) {
@@ -3800,18 +3603,8 @@ export function Arena3D({
         barrelMesh.position.z = 0.45;
       }
 
-      // Check if dealer is being hovered in KBM controls
-      let isShootDealerHovered = false;
-      if (hoveredMesh) {
-        let p: THREE.Object3D | null = hoveredMesh;
-        while (p && p !== scene) {
-          if (p === dealerGroup) {
-            isShootDealerHovered = true;
-            break;
-          }
-          p = p.parent;
-        }
-      }
+      // Check if dealer is being hovered via the top screen DOM zone
+      let isShootDealerHovered = (window as any).dealerDomHovered === true;
 
       // Handle Dealer Death Visuals: eyes turn to X and he falls
       if (latest.dealer.health <= 0) {
@@ -4206,7 +3999,7 @@ export function Arena3D({
 
             const impactPos = new THREE.Vector3(0, -0.9, -4.8);
             spawnParticles(impactPos, 0x111111, 30, 0.18, -0.001, 'SMOKE');
-            spawnParticles(impactPos, 0x880000, 25, 0.12, -0.002, 'BLOOD');
+            spawnParticles(impactPos, 0x480000, 25, 0.12, -0.002, 'BLOOD');
           }
 
           // Ragdoll dampening bounce off concrete floor
@@ -4283,44 +4076,31 @@ export function Arena3D({
       }
 
       // Cylindrical drum spinning of the weapon revolver itself!
-      // (drum, flutes and rims all rotate together through the spin proxy)
-      if (ar.spinProxy) {
+      if (revolverCylinderMesh) {
         if (latest.gameState === 'LOADING') {
-          if (latest.loadingPhase === 'spin') {
-            ar.spinProxy.rotation.z = ar.spinAngle;
-          } else {
-            ar.spinProxy.rotation.z = 0;
-          }
+          revolverCylinderMesh.rotation.z += 0.35 * deltaScale;
         } else if (ar.activeShootAnimationState === 'RAISING') {
-          ar.spinProxy.rotation.z += 0.05 * deltaScale;
+          revolverCylinderMesh.rotation.z += 0.05 * deltaScale;
         } else {
           const targetDrumAngle = (latest.currentChamberIndex / 6) * Math.PI * 2;
-          let drumDiff = targetDrumAngle - ar.spinProxy.rotation.z;
+          let drumDiff = targetDrumAngle - revolverCylinderMesh.rotation.z;
           while (drumDiff < -Math.PI) drumDiff += Math.PI * 2;
           while (drumDiff > Math.PI) drumDiff -= Math.PI * 2;
-          ar.spinProxy.rotation.z += drumDiff * damp(0.2);
+          revolverCylinderMesh.rotation.z += drumDiff * damp(0.2);
         }
       }
 
 
       // --- GUN ANIMATION SYSTEM ---
-      if (latest.gameState === 'LOADING') {
-        // The interactive loading block below fully owns the revolver's bench
-        // pose; the idle/shoot animation must not fight it every frame.
-        ar.activeShootAnimationState = 'IDLE';
-        ar.activeShootStartTime = 0;
-        ar.hasDischarged = false;
-        hammerMesh.rotation.x = -0.15;
-      } else if (latest.gameState === 'SHOOTING') {
+      if (latest.gameState === 'SHOOTING') {
           if (ar.activeShootAnimationState === 'IDLE') {
           ar.activeShootAnimationState = 'RAISING';
           ar.activeShootStartTime = Date.now();
           ar.hasDischarged = false;
           ar.hasCockingSoundPlayed = false;
 
-          const msg = latest.message.toLowerCase();
-          ar.animShooter = (msg.startsWith("the dealer") || msg.includes("dealer pulled") || msg.includes("dealer fires")) ? 'dealer' : 'player';
-          ar.animTarget = (msg.includes("at yourself") || msg.includes("at you") || msg.includes("on you")) ? 'player' : 'dealer';
+          ar.animShooter = latest.shooter || 'player';
+          ar.animTarget = latest.target || 'dealer';
           ar.animIsLive = latest.chambers[latest.currentChamberIndex]?.isLive || false;
         }
 
@@ -4460,10 +4240,13 @@ export function Arena3D({
                 vibrateGamepad('jolt', { duration: 180, weak: 0.8, strong: 0.9 });
               }
 
-              if (ar.animTarget === 'dealer') {
+              const isTargetDealer = ar.animTarget === 'dealer';
+              const targetImpactPos = isTargetDealer 
+                ? new THREE.Vector3(-0.1, 1.35, -1.95) 
+                : new THREE.Vector3(0, 1.35, 1.35);
+
+              if (isTargetDealer) {
                 stateRef.current.dealerFlinchTime = Date.now();
-                const muzzleWorldPos = new THREE.Vector3(0, 0.18, 0.9).applyMatrix4(gunGroup.matrixWorld);
-                spawnParticles(muzzleWorldPos, 0x880000, 80, 0.45, 0.002, 'BLOOD');
               }
 
               const muzzleWorldPos = new THREE.Vector3(0, 0.18, 0.9).applyMatrix4(gunGroup.matrixWorld);
@@ -4473,10 +4256,17 @@ export function Arena3D({
               spawnParticles(muzzleWorldPos, 0xcc9900, 1, 0.85, 0.0001, 'BULLET');
               spawnParticles(chamberWorldPos, 0xd4af37, 1, 0.16, 0.0038, 'SHELL');
 
-              // 2. Spark particles, heavy smoke & blood splatter
+              // 2. Muzzle spark flash & heavy barrel smoke
               spawnParticles(muzzleWorldPos, 0xffaa00, 85, 0.5, 0.001, 'SPARK'); 
-              spawnParticles(muzzleWorldPos, 0xd01010, 800, 0.85, 0.0035, 'BLOOD'); // Massively intense visceral blood splatter!
               spawnParticles(muzzleWorldPos, 0xaaaaaa, 65, 0.65, -0.0018, 'SMOKE');
+
+              // 3. MASSIVE PROCEDURAL BLOOD SPLATTER BURST FROM TARGET IMPACT POINT
+              // Blasts directly down and outward onto table surface, items, and surrounding floor
+              spawnParticles(targetImpactPos, 0x2a0000, 380, 0.45, 0.004, 'BLOOD');
+              
+              const midPoint = targetImpactPos.clone().add(muzzleWorldPos).multiplyScalar(0.5);
+              spawnParticles(midPoint, 0x2a0000, 220, 0.35, 0.004, 'BLOOD');
+              spawnParticles(muzzleWorldPos, 0x2a0000, 150, 0.28, 0.004, 'BLOOD');
             } else {
               // Dry blank click -> extremely subtle mechanical click feedback
               ar.lastFireIsLive = false;
@@ -4584,26 +4374,23 @@ export function Arena3D({
       }
 
 
-      // --- AMBIENT ANIMS ON INVENTORY ITEMS ---
-      playerItemMeshes.forEach((mesh, idx) => {
-        mesh.position.y = Math.sin(time * 2.0 + idx * 0.7) * 0.03;
-        mesh.rotation.y = Math.cos(time * 0.6 + idx * 0.5) * 0.08;
+      // --- REALISTIC GROUNDED INVENTORY ITEMS ON TABLE SURFACE ---
+      playerItemMeshes.forEach((mesh) => {
+        // Firmly grounded flat on table top (no floating)
+        mesh.position.y = 0;
 
         // Interactive states hovering/gamepad tracking highlights
         const isHovered = hoveredMesh === mesh;
         const isSelected = isHovered;
-        const currentInputType = getControllerSettings().inputType || 'kbm';
 
         if (isSelected && latest.showControls) {
-          if (currentInputType === 'gamepad') {
-            mesh.position.y += 0.25 + Math.sin(time * 8.0) * 0.03;
-          }
-          mesh.rotation.y += 0.08 * deltaScale;
-          mesh.scale.setScalar(1.24);
+          // Keep item on table surface (no floating into mid-air)
+          mesh.position.y = 0;
+          mesh.scale.setScalar(1.15);
           mesh.traverse((child) => {
             if (child instanceof THREE.Mesh && child.material) {
               if ('emissive' in child.material) {
-                (child.material as any).emissive.setHex(0x350d0d);
+                (child.material as any).emissive.setHex(0x441111);
               }
             }
           });
@@ -4617,30 +4404,11 @@ export function Arena3D({
             }
           });
         }
-
-        // Red glow outline flags the selected piece, tracing its curves
-        const pOutlines: THREE.LineSegments[] | undefined = mesh.userData?.outlines;
-        if (pOutlines) {
-          const showOutline = isSelected && latest.showControls;
-          pOutlines.forEach((o) => { o.visible = showOutline; });
-          if (showOutline) outlineMatRed.opacity = 0.55 + Math.sin(time * 7.0) * 0.3;
-        }
       });
 
-      // Dealer slow item floating sways
-      dealerItemMeshes.forEach((mesh, idx) => {
-        mesh.position.y = Math.sin(time * 1.5 + idx * 0.6) * 0.02;
-        mesh.rotation.y = Math.sin(time * 0.5 + idx * 0.3) * 0.05;
-      });
-
-      // Shop shelf items: red glow outline highlights the hovered buyable piece
-      shopItemMeshes.forEach((mesh) => {
-        const sOutlines: THREE.LineSegments[] | undefined = mesh.userData?.outlines;
-        if (sOutlines) {
-          const showOutline = isLookingAtShopRef.current && hoveredMesh === mesh;
-          sOutlines.forEach((o) => { o.visible = showOutline; });
-          if (showOutline) outlineMatRed.opacity = 0.55 + Math.sin(time * 7.0) * 0.3;
-        }
+      // Dealer items resting flat on tabletop surface (no floating)
+      dealerItemMeshes.forEach((mesh) => {
+        mesh.position.y = 0;
       });
 
 
@@ -4669,6 +4437,22 @@ export function Arena3D({
             ar.hasSlicedRazor = false;
             ar.hasLitCigarette = false;
             ar.hasExhaledSmoke = false;
+            ar.whiskeyVolume = 1.0;
+            ar.whiskeySloshAngleX = 0;
+            ar.whiskeySloshAngleZ = 0;
+            ar.whiskeySloshVelX = 0;
+            ar.whiskeySloshVelZ = 0;
+            ar.syringeBubblePos = 0.28;
+            ar.syringeBubblePosX = 0.008;
+            ar.syringeBubblePosZ = 0;
+            ar.syringeBubbleVel = 0;
+            ar.syringeBubbleVelX = 0;
+            ar.syringeBubbleVelZ = 0;
+            ar.syringeFluidVolume = 1.0;
+            ar.syringeFluidOscillation = 0;
+            ar.syringeFluidOscVel = 0;
+            ar.prevItemPos.set(0, 0, 0);
+            ar.prevItemRot.set(0, 0, 0);
             ar.activeItemAnimUser = userStr;
             ar.activeItemAnimStartTime = Date.now();
             
@@ -4823,6 +4607,14 @@ export function Arena3D({
               if (child.name === 'whiskeyCork') corkMesh = child as THREE.Mesh;
             });
 
+            // Timestep delta for fluid physics calculations
+            const dt = Math.min(0.033, Math.max(0.005, deltaScale / 60.0));
+            const currentPos = ar.activeItemAnimGroup.position;
+            
+            // Linear velocity of bottle for fluid inertia forces
+            const linVel = currentPos.clone().sub(ar.prevItemPos).divideScalar(dt);
+            ar.prevItemPos.copy(currentPos);
+
             if (elapsedSec < 1.2) {
               const t = elapsedSec / 1.2;
               const startPos = isPlayer ? new THREE.Vector3(0.6, 0.6, 0.8) : new THREE.Vector3(-0.8, 0.6, -1.6);
@@ -4838,14 +4630,7 @@ export function Arena3D({
                 ar.dealerMouthOpenFactor = t * 0.5;
                 ar.dealerHeadTiltFactor = t * 0.4;
               }
-
-              // Liquid sloshes in bottle during pickup
-              if (liquidMesh && meniscusMesh) {
-                const sloshWave = Math.sin(time * 12) * 0.02;
-                liquidMesh.rotation.z = sloshWave;
-                meniscusMesh.position.y = 0.315 + sloshWave * 0.5;
-              }
-            } else if (elapsedSec < 3.0) {
+            } else if (elapsedSec < 3.2) {
               // Pop cork on first frame of drinking
               if (corkMesh && corkMesh.visible) {
                 corkMesh.visible = false;
@@ -4854,16 +4639,15 @@ export function Arena3D({
               }
 
               const tiltT = Math.min(1.0, (elapsedSec - 1.2) / 0.8);
-              const drainT = Math.min(1.0, (elapsedSec - 1.2) / 1.6);
               
               const rotX = isPlayer ? 
-                (Math.PI / 4 + tiltT * Math.PI * 0.48) : 
-                (-Math.PI / 4 - tiltT * Math.PI * 0.48);
+                (Math.PI / 4 + tiltT * Math.PI * 0.52) : 
+                (-Math.PI / 4 - tiltT * Math.PI * 0.52);
 
               ar.activeItemAnimGroup.rotation.set(
                 rotX,
                 0,
-                tiltT * (isPlayer ? 0.3 : -0.3)
+                tiltT * (isPlayer ? 0.35 : -0.35)
               );
               
               const currentSpoutOffset = localSpout.clone().applyEuler(ar.activeItemAnimGroup.rotation);
@@ -4873,27 +4657,88 @@ export function Arena3D({
                 ar.dealerMouthOpenFactor = 1.0;
                 ar.dealerHeadTiltFactor = 1.0;
               }
-
-              // Realistic Liquid Level & Sloshing Drain Physics
-              if (liquidMesh && meniscusMesh) {
-                const remainingRatio = Math.max(0.01, 1.0 - drainT);
-                liquidMesh.scale.y = remainingRatio;
-                liquidMesh.position.y = 0.16 * remainingRatio;
-                
-                const sloshWave = Math.sin(time * 18) * 0.03 * remainingRatio;
-                meniscusMesh.position.y = 0.315 * remainingRatio + sloshWave;
-                meniscusMesh.scale.set(remainingRatio, remainingRatio, remainingRatio);
-              }
-              
-              const spoutPos = localSpout.clone().applyMatrix4(ar.activeItemAnimGroup.matrixWorld);
-              
-              if (Math.random() < 0.65 && drainT < 0.95) {
-                spawnParticles(spoutPos, 0xdf8a1c, 4, 0.04, 0.003, 'LIQUID');
-                spawnParticles(spoutPos, 0xf59e0b, 2, 0.02, 0.002, 'LIQUID');
-              }
             } else {
               discardItemPhysics(ar.activeItemAnimGroup, ar.activeItemAnimUser || 'player');
               ar.activeItemAnimGroup = null;
+              break;
+            }
+
+            // --- FULL FLUID PHYSICS ENGINE FOR WHISKEY BOTTLE ---
+            // Local gravity vector inside bottle coordinate frame
+            const invQuat = ar.activeItemAnimGroup.quaternion.clone().invert();
+            const localGravity = new THREE.Vector3(0, -1, 0).applyQuaternion(invQuat);
+
+            // Target surface tilt angles to keep liquid level with world horizon
+            const targetSloshX = -Math.atan2(localGravity.z, -localGravity.y);
+            const targetSloshZ = Math.atan2(localGravity.x, -localGravity.y);
+
+            // Inertial slosh forces caused by bottle translation and rotation
+            const inertiaForceX = -linVel.z * 0.14;
+            const inertiaForceZ = linVel.x * 0.14;
+
+            // Damped harmonic spring oscillator equations for fluid surface physics
+            const springK = 42.0;
+            const dampK = 6.2;
+
+            const accelX = springK * (targetSloshX - ar.whiskeySloshAngleX) - dampK * ar.whiskeySloshVelX + inertiaForceX;
+            const accelZ = springK * (targetSloshZ - ar.whiskeySloshAngleZ) - dampK * ar.whiskeySloshVelZ + inertiaForceZ;
+
+            ar.whiskeySloshVelX += accelX * dt;
+            ar.whiskeySloshVelZ += accelZ * dt;
+            ar.whiskeySloshAngleX += ar.whiskeySloshVelX * dt;
+            ar.whiskeySloshAngleZ += ar.whiskeySloshVelZ * dt;
+
+            // Torricelli Hydrostatic Liquid Drain Dynamics - smooth drinking effect
+            if (elapsedSec >= 1.2 && ar.whiskeyVolume > 0.001) {
+              const drinkProgress = Math.min(1.0, (elapsedSec - 1.2) / 1.8);
+              ar.whiskeyVolume = Math.max(0.001, 1.0 - drinkProgress);
+
+              // Continuous Spout Jet & Liquid Drop Physics
+              if (drinkProgress < 0.98 && Math.random() < 0.8) {
+                const spoutWorldPos = localSpout.clone().applyMatrix4(ar.activeItemAnimGroup.matrixWorld);
+                spawnParticles(spoutWorldPos, 0x8c3409, 3, 0.04, 0.003, 'LIQUID');
+                spawnParticles(spoutWorldPos, 0xaa420e, 2, 0.02, 0.002, 'LIQUID');
+              }
+            }
+
+            // Apply fluid simulation transform states strictly within bottle glass walls
+            if (liquidMesh && meniscusMesh) {
+              const vol = ar.whiskeyVolume;
+              if (vol <= 0.005) {
+                liquidMesh.visible = false;
+                meniscusMesh.visible = false;
+              } else {
+                liquidMesh.visible = true;
+                meniscusMesh.visible = true;
+
+                // Liquid volume shifts along Y depending on bottle tilt (localGravity.y: -1 = upright, +1 = inverted)
+                const invertedFactor = Math.max(0, localGravity.y + 1.0) / 2.0; // 0 to 1
+                const baseMinY = 0.015;
+                const baseMaxY = 0.35 - 0.28 * vol;
+                const liquidBaseY = THREE.MathUtils.lerp(baseMinY, baseMaxY, Math.pow(invertedFactor, 1.2));
+
+                liquidMesh.position.y = liquidBaseY;
+                liquidMesh.scale.y = Math.max(0.001, vol);
+                liquidMesh.scale.x = 1.0;
+                liquidMesh.scale.z = 1.0;
+                liquidMesh.rotation.set(0, 0, 0); // Keep mesh flush with inner 0.134x0.134 glass walls
+
+                // Meniscus surface stays at the top/free edge of liquid level
+                const topY = liquidBaseY + 0.28 * vol;
+                meniscusMesh.position.y = topY;
+
+                // Clamp slosh tilt angles
+                const sloshX = THREE.MathUtils.clamp(ar.whiskeySloshAngleX, -0.28, 0.28);
+                const sloshZ = THREE.MathUtils.clamp(ar.whiskeySloshAngleZ, -0.28, 0.28);
+
+                meniscusMesh.rotation.x = -Math.PI / 2 + sloshX;
+                meniscusMesh.rotation.z = sloshZ;
+
+                // Scale meniscus plane slightly along tilt axes so corners NEVER poke outside 0.134 inner cavity
+                const scaleFactorX = Math.max(0.80, Math.cos(sloshZ));
+                const scaleFactorZ = Math.max(0.80, Math.cos(sloshX));
+                meniscusMesh.scale.set(scaleFactorX, scaleFactorZ, 1.0);
+              }
             }
             break;
           }
@@ -4949,7 +4794,14 @@ export function Arena3D({
                 }
               }
             } else {
-              discardItemPhysics(ar.activeItemAnimGroup, ar.activeItemAnimUser || 'player');
+              // Disintegrate into bloody sparks instead of dropping
+              const targetWorldPos = new THREE.Vector3();
+              ar.activeItemAnimGroup.getWorldPosition(targetWorldPos);
+              spawnParticles(targetWorldPos, 0xff3333, 40, 0.35, 0.001, 'SPARK'); 
+              spawnParticles(targetWorldPos, 0xd01010, 60, 0.25, -0.001, 'BLOOD');
+              
+              if (ar.activeItemAnimGroup.parent) ar.activeItemAnimGroup.parent.remove(ar.activeItemAnimGroup);
+              disposeNode(ar.activeItemAnimGroup);
               ar.activeItemAnimGroup = null;
             }
             break;
@@ -4976,9 +4828,9 @@ export function Arena3D({
             const zippoCap = zippoGroup.getObjectByName('zippoCap');
             const zippoFlame = zippoGroup.getObjectByName('zippoFlame');
 
-            if (elapsedSec < 1.2) {
-              // Phase 1: Bring cigarette up to lips, lighter hidden below
-              const t = elapsedSec / 1.2;
+            if (elapsedSec < 0.6) {
+              // Phase 1: Bring cigarette up to lips quickly
+              const t = elapsedSec / 0.6;
               const easeT = 1 - Math.pow(1 - t, 3);
               const startPos = isPlayerUser ? new THREE.Vector3(0.5, 0.5, 0.8) : new THREE.Vector3(-0.6, 0.6, -1.6);
               
@@ -4996,7 +4848,6 @@ export function Arena3D({
                 cigGroupInner.position.y = 0.02 * (1 - easeT) - 0.12 * easeT;
               }
 
-              // Keep Zippo hidden below offscreen during initial cigarette movement
               zippoGroup.visible = false;
               zippoGroup.position.set(isPlayerUser ? 0.18 : -0.18, -0.6, isPlayerUser ? 0.1 : -0.1);
 
@@ -5004,7 +4855,7 @@ export function Arena3D({
                 ar.dealerMouthOpenFactor = easeT * 0.4;
                 ar.dealerHeadTiltFactor = easeT * 0.4;
               }
-            } else if (elapsedSec < 3.4) {
+            } else if (elapsedSec < 1.8) {
               // Phase 2: Pull out Zippo lighter, flick open cap, strike flint, ignite flame, light cigarette, and lower lighter
               ar.activeItemAnimGroup.position.copy(lipsPos);
               ar.activeItemAnimGroup.rotation.set(
@@ -5024,11 +4875,11 @@ export function Arena3D({
               }
 
               zippoGroup.visible = true;
-              const phase2T = elapsedSec - 1.2; // 0.0 to 2.2s
+              const phase2T = elapsedSec - 0.6; // 0.0 to 1.2s
 
-              if (phase2T < 0.5) {
+              if (phase2T < 0.25) {
                 // Subphase A: Lighter rises up from hand height to beside cigarette tip
-                const raiseT = phase2T / 0.5;
+                const raiseT = phase2T / 0.25;
                 const easeR = raiseT < 0.5 ? 2 * raiseT * raiseT : -1 + (4 - 2 * raiseT) * raiseT;
                 
                 const startLighterY = -0.6;
@@ -5044,9 +4895,9 @@ export function Arena3D({
 
                 if (zippoCap) zippoCap.rotation.z = 0;
                 if (zippoFlame) zippoFlame.visible = false;
-              } else if (phase2T < 0.9) {
+              } else if (phase2T < 0.45) {
                 // Subphase B: Smoothly flick cap open
-                const capT = (phase2T - 0.5) / 0.4;
+                const capT = (phase2T - 0.25) / 0.2;
                 const easeC = capT < 0.5 ? 2 * capT * capT : -1 + (4 - 2 * capT) * capT;
 
                 zippoGroup.position.set(
@@ -5058,7 +4909,7 @@ export function Arena3D({
                   zippoCap.rotation.z = -Math.PI * 0.7 * easeC;
                 }
                 if (zippoFlame) zippoFlame.visible = false;
-              } else if (phase2T < 1.7) {
+              } else if (phase2T < 0.9) {
                 // Subphase C: Strike flint, ignite flame, heat tobacco tip
                 zippoGroup.position.set(
                   isPlayerUser ? 0.12 : -0.12,
@@ -5084,26 +4935,26 @@ export function Arena3D({
                 lighterTipPos.y -= (isPlayerUser ? 0.04 : -0.04);
 
                 // Initial spark burst on flint wheel strike
-                if (phase2T < 1.1 && Math.random() < 0.85) {
+                if (phase2T < 0.65 && Math.random() < 0.85) {
                   spawnParticles(lighterTipPos, 0xffaa00, 6, 0.07, 0.002, 'SPARK');
                   spawnParticles(lighterTipPos, 0xff3300, 4, 0.05, 0.001, 'SPARK');
                 }
 
                 // Heat up cigarette ember tip as flame catches tobacco
                 if (emberTip && (emberTip as THREE.Mesh).material instanceof THREE.MeshStandardMaterial) {
-                  const heatT = (phase2T - 0.9) / 0.8;
+                  const heatT = (phase2T - 0.45) / 0.45;
                   ((emberTip as THREE.Mesh).material as THREE.MeshStandardMaterial).emissiveIntensity = 2.0 + heatT * 3.5 + Math.sin(elapsedSec * 30.0) * 0.8;
                 }
 
-                // Wisps of blue-gray smoke rising from tip
+                // Subtle wisps of soft blue-gray smoke rising from tip
                 const cigTipPos = lipsPos.clone();
                 cigTipPos.z += (isPlayerUser ? -0.15 : 0.15);
-                if (Math.random() < 0.6) {
-                  spawnParticles(cigTipPos, 0xaaaaaa, 2, 0.02, 0.001, 'SMOKE');
+                if (Math.random() < 0.25) {
+                  spawnParticles(cigTipPos, 0xa0b0c0, 1, 0.015, -0.0006, 'SMOKE');
                 }
               } else {
                 // Subphase D: Snap cap shut, extinguish flame, retract lighter back down
-                const retractT = (phase2T - 1.7) / 0.5;
+                const retractT = (phase2T - 0.9) / 0.3;
                 const easeRetract = retractT < 0.5 ? 2 * retractT * retractT : -1 + (4 - 2 * retractT) * retractT;
 
                 if (zippoCap) zippoCap.rotation.z = 0;
@@ -5121,13 +4972,13 @@ export function Arena3D({
                   zippoGroup.visible = false;
                 }
               }
-            } else if (elapsedSec < 5.4) {
+            } else if (elapsedSec < 2.5) {
               // Phase 3: Deep Inhale Drag on Cigarette
               zippoGroup.visible = false;
 
               ar.activeItemAnimGroup.position.copy(lipsPos);
 
-              const dragT = (elapsedSec - 3.4) / 2.0;
+              const dragT = (elapsedSec - 1.8) / 0.7;
               const cherryIntensity = Math.sin(dragT * Math.PI) * 0.035;
               ar.activeItemAnimGroup.position.z += (isPlayerUser ? -cherryIntensity : cherryIntensity);
 
@@ -5141,13 +4992,13 @@ export function Arena3D({
                 ((emberTip as THREE.Mesh).material as THREE.MeshStandardMaterial).emissiveIntensity = 4.0 + Math.sin(dragT * Math.PI) * 3.5;
               }
 
-              // Hot ember sparks and tip smoke during deep inhalation
+              // Hot ember sparks and subtle tip smoke during deep inhalation
               const cigTipPos = lipsPos.clone();
               cigTipPos.z += (isPlayerUser ? -0.15 : 0.15);
               
-              if (Math.random() < 0.8) {
-                spawnParticles(cigTipPos, 0xff4400, 3, 0.03, 0.001, 'SPARK');
-                spawnParticles(cigTipPos, 0xdddddd, 3, 0.03, 0.002, 'SMOKE');
+              if (Math.random() < 0.45) {
+                spawnParticles(cigTipPos, 0xff4400, 2, 0.025, 0.001, 'SPARK');
+                spawnParticles(cigTipPos, 0x90a0b0, 1, 0.018, -0.0006, 'SMOKE');
               }
 
               // Subtle camera tremor representing deep inhalation drag
@@ -5155,11 +5006,11 @@ export function Arena3D({
                 camera.position.x += (Math.random() - 0.5) * 0.006;
                 camera.position.y += (Math.random() - 0.5) * 0.006;
               }
-            } else if (elapsedSec < 7.2) {
+            } else if (elapsedSec < 3.2) {
               // Phase 4: Lower Cigarette & Exhale Dense Volumetric Smoke Plume
               zippoGroup.visible = false;
 
-              const exhaleT = (elapsedSec - 5.4) / 1.8;
+              const exhaleT = (elapsedSec - 2.5) / 0.7;
               
               // Lower cigarette away from mouth
               const lowerPos = lipsPos.clone();
@@ -5177,13 +5028,12 @@ export function Arena3D({
                 import('../audio').then(a => a.playSmokeExhale());
               }
 
-              // Heavy dense smoke cloud billows out forward from mouth across screen
+              // Soft, translucent smoke cloud billows out gracefully from mouth
               const smokeSource = lipsPos.clone();
               smokeSource.y -= 0.02;
               
-              if (Math.random() < 0.95) {
-                spawnParticles(smokeSource, 0xe0e0e8, 9, 0.08, 0.0035, 'SMOKE');
-                spawnParticles(smokeSource, 0xa0a0b0, 7, 0.10, 0.0045, 'SMOKE');
+              if (Math.random() < 0.45) {
+                spawnParticles(smokeSource, 0xb0c0d0, 2, 0.045, -0.0008, 'SMOKE');
               }
             } else {
               discardItemPhysics(ar.activeItemAnimGroup, ar.activeItemAnimUser || 'player');
@@ -5243,17 +5093,6 @@ export function Arena3D({
                 if (isPlayer) {
                   ar.cameraShakeIntensity = 0.5;
                 }
-
-                // Fine visceral blood droplets spray from incision point
-                const cutWorldPos = handPos.clone();
-                spawnParticles(cutWorldPos, 0xbd0909, 18, 0.08, -0.001, 'BLOOD');
-                spawnParticles(cutWorldPos, 0x800000, 12, 0.05, -0.0012, 'BLOOD');
-              }
-
-              // Subtle blood mist continuation during slice
-              if (sliceT > 0.3 && sliceT < 0.7 && Math.random() < 0.35) {
-                const cutWorldPos = currentCutPos.clone();
-                spawnParticles(cutWorldPos, 0xcc1111, 3, 0.03, -0.001, 'BLOOD');
               }
 
               if (!isPlayer) {
@@ -5341,6 +5180,7 @@ export function Arena3D({
             let fluidMesh: THREE.Mesh | null = null;
             let meniscusMesh: THREE.Mesh | null = null;
             let bubbleMesh: THREE.Mesh | null = null;
+            let bubble2Mesh: THREE.Mesh | null = null;
             let stopperMesh: THREE.Mesh | null = null;
             let plungerMesh: THREE.Mesh | null = null;
 
@@ -5348,9 +5188,15 @@ export function Arena3D({
               if (child.name === 'syringeFluid') fluidMesh = child as THREE.Mesh;
               if (child.name === 'syringeMeniscus') meniscusMesh = child as THREE.Mesh;
               if (child.name === 'syringeBubble') bubbleMesh = child as THREE.Mesh;
+              if (child.name === 'syringeBubble2') bubble2Mesh = child as THREE.Mesh;
               if (child.name === 'syringeStopper') stopperMesh = child as THREE.Mesh;
               if (child.name === 'syringePlunger') plungerMesh = child as THREE.Mesh;
             });
+
+            const dt = Math.min(0.033, Math.max(0.005, deltaScale / 60.0));
+            const currentPos = ar.activeItemAnimGroup.position;
+            const linVel = currentPos.clone().sub(ar.prevItemPos).divideScalar(dt);
+            ar.prevItemPos.copy(currentPos);
 
             if (elapsedSec < 1.0) {
               const t = elapsedSec / 1.0;
@@ -5360,27 +5206,20 @@ export function Arena3D({
                 targetP,
                 t
               );
-              ar.activeItemAnimGroup.rotation.set(ar.activeItemAnimUser === 'player' ? -Math.PI / 2.5 : -Math.PI / 2.5, ar.activeItemAnimUser === 'player' ? 0 : Math.PI, Math.sin(time * 5) * 0.1);
+              ar.activeItemAnimGroup.rotation.set(
+                ar.activeItemAnimUser === 'player' ? -Math.PI / 2.5 : -Math.PI / 2.5,
+                ar.activeItemAnimUser === 'player' ? 0 : Math.PI,
+                Math.sin(time * 5) * 0.1
+              );
 
               if (ar.activeItemAnimUser === 'dealer') {
                 ar.dealerMouthOpenFactor = t * 0.4;
                 ar.dealerHeadTiltFactor = t * -0.2;
               }
 
-              // Liquid Wobble & Floating Air Bubble Physics in syringe during movement
-              if (fluidMesh && bubbleMesh && meniscusMesh) {
-                const fluidWobble = Math.sin(time * 16) * 0.02;
-                fluidMesh.scale.x = 1.0 + fluidWobble;
-                fluidMesh.scale.z = 1.0 - fluidWobble;
-                bubbleMesh.position.x = Math.sin(time * 8) * 0.012;
-                bubbleMesh.position.y = 0.28 + Math.cos(time * 10) * 0.008;
-                meniscusMesh.position.y = 0.31 + fluidWobble * 0.1;
-              }
-
               if (elapsedSec >= 0.3 && !ar.hasCappedSyringe) {
                 ar.hasCappedSyringe = true;
                 playSyringeCap();
-                spawnParticles(ar.activeItemAnimGroup.position, 0xffffff, 4, 0.08, 0.001, 'SPARK');
               }
             } else if (elapsedSec < 2.5) {
               const tSlam = Math.min(1.0, (elapsedSec - 1.0) / 0.155);
@@ -5396,7 +5235,11 @@ export function Arena3D({
               currentP.z += offsetZ;
               currentP.x += Math.sin(time * 40) * 0.002;
               ar.activeItemAnimGroup.position.copy(currentP);
-              ar.activeItemAnimGroup.rotation.set(ar.activeItemAnimUser === 'player' ? -Math.PI / 2.5 : -Math.PI / 2.5, ar.activeItemAnimUser === 'player' ? 0 : Math.PI, 0);
+              ar.activeItemAnimGroup.rotation.set(
+                ar.activeItemAnimUser === 'player' ? -Math.PI / 2.5 : -Math.PI / 2.5,
+                ar.activeItemAnimUser === 'player' ? 0 : Math.PI,
+                0
+              );
 
               if (ar.activeItemAnimUser === 'dealer') {
                 ar.dealerMouthOpenFactor = 0.8;
@@ -5408,9 +5251,13 @@ export function Arena3D({
                 playSyringeSlam();
                 vibrateGamepad(ar.activeItemAnimUser === 'player' ? 'strong' : 'weak');
                 
-                const spillPos = ar.activeItemAnimGroup.position.clone();
-                spillPos.y -= 0.05;
-                spawnParticles(spillPos, 0xbf0909, 12, 0.06, 0.0015, 'BLOOD');
+                // Trigger acoustic fluid impulse on impact
+                ar.syringeFluidOscVel = 0.18;
+
+                // Subtle small blood spurt from needle insertion point
+                const needleTipWorldPos = new THREE.Vector3(0, -0.10, 0).applyMatrix4(ar.activeItemAnimGroup.matrixWorld);
+                spawnParticles(needleTipWorldPos, 0x2a0000, 10, 0.12, 0.003, 'BLOOD');
+
                 if (ar.activeItemAnimUser === 'player') {
                   ar.cameraShakeIntensity = 0.4;
                 }
@@ -5418,39 +5265,142 @@ export function Arena3D({
 
               if (elapsedSec >= 1.25) {
                 const plungeProgress = Math.min(1.0, (elapsedSec - 1.25) / 1.0);
-                const fluidRatio = Math.max(0.001, 1.0 - plungeProgress);
+                ar.syringeFluidVolume = Math.max(0.001, 1.0 - plungeProgress);
 
                 if (plungerMesh) plungerMesh.position.y = 0.48 - plungeProgress * 0.11;
                 if (stopperMesh) stopperMesh.position.y = 0.32 - plungeProgress * 0.20;
 
-                if (fluidMesh) {
-                  fluidMesh.scale.y = fluidRatio;
-                  fluidMesh.position.y = 0.09 + fluidRatio * 0.11;
-                }
-                if (meniscusMesh) {
-                  meniscusMesh.position.y = 0.09 + fluidRatio * 0.22;
-                  meniscusMesh.scale.set(fluidRatio, fluidRatio, fluidRatio);
-                }
-
-                if (bubbleMesh) {
-                  if (plungeProgress > 0.8) {
-                    bubbleMesh.visible = false;
-                  } else {
-                    const bScale = Math.max(0.001, 1.0 - plungeProgress);
-                    bubbleMesh.scale.set(bScale, bScale, bScale);
-                    bubbleMesh.position.y = 0.09 + fluidRatio * 0.20;
-                  }
-                }
-
-                if (Math.random() < 0.7) {
+                // Subtle blood droplets/spurt trailing at needle tip as fluid is injected
+                if (Math.random() < 0.30 && plungeProgress < 0.90) {
                   const needleTipWorldPos = new THREE.Vector3(0, -0.10, 0).applyMatrix4(ar.activeItemAnimGroup.matrixWorld);
-                  spawnParticles(needleTipWorldPos, 0x00ffaa, 5, 0.05, 0.002, 'LIQUID');
-                  spawnParticles(needleTipWorldPos, 0x33ffbb, 2, 0.03, 0.001, 'SPARK');
+                  spawnParticles(needleTipWorldPos, 0x2a0000, 2, 0.04, 0.002, 'BLOOD');
                 }
               }
             } else {
               discardItemPhysics(ar.activeItemAnimGroup, ar.activeItemAnimUser || 'player');
               ar.activeItemAnimGroup = null;
+              break;
+            }
+
+            // --- HYDRAULIC & BUOYANT BUBBLE PHYSICS FOR SYRINGE ---
+            // Local gravity vector in syringe coordinates
+            const invQuat = ar.activeItemAnimGroup.quaternion.clone().invert();
+            const localGravity = new THREE.Vector3(0, -1, 0).applyQuaternion(invQuat);
+
+            // 1. Fluid Oscillation Damped Harmonic Wave
+            const springK = 85.0;
+            const dampK = 8.5;
+            const oscAccel = -springK * ar.syringeFluidOscillation - dampK * ar.syringeFluidOscVel;
+            ar.syringeFluidOscVel += oscAccel * dt;
+            ar.syringeFluidOscillation += ar.syringeFluidOscVel * dt;
+
+            // 2. 3D Buoyant Air Bubble Physics Simulation
+            const stopperY = (stopperMesh as THREE.Mesh | null) ? (stopperMesh as THREE.Mesh).position.y : (0.32 - Math.min(1.0, Math.max(0, (elapsedSec - 1.25) / 1.0)) * 0.20);
+            const plungeRatio = Math.max(0, Math.min(1.0, (0.32 - stopperY) / 0.20));
+            const vol = Math.max(0.0, 1.0 - plungeRatio);
+            const fluidHeight = vol * 0.22;
+            const fluidBottomY = 0.09;
+            const fluidTopY = fluidBottomY + fluidHeight;
+
+            // 3D Buoyancy acceleration (floats opposite to local gravity)
+            const buoyX = -localGravity.x * 0.10;
+            const buoyY = -localGravity.y * 0.10;
+            const buoyZ = -localGravity.z * 0.10;
+
+            // Inertial forces from syringe movement
+            const inertX = -linVel.x * 0.03;
+            const inertY = -linVel.y * 0.05;
+            const inertZ = -linVel.z * 0.03;
+
+            // Viscous drag
+            const dragX = -ar.syringeBubbleVelX * 5.0;
+            const dragY = -ar.syringeBubbleVel * 5.0;
+            const dragZ = -ar.syringeBubbleVelZ * 5.0;
+
+            ar.syringeBubbleVelX += (buoyX + inertX + dragX) * dt;
+            ar.syringeBubbleVel += (buoyY + inertY + dragY) * dt;
+            ar.syringeBubbleVelZ += (buoyZ + inertZ + dragZ) * dt;
+
+            ar.syringeBubblePosX += ar.syringeBubbleVelX * dt;
+            ar.syringeBubblePos += ar.syringeBubbleVel * dt;
+            ar.syringeBubblePosZ += ar.syringeBubbleVelZ * dt;
+
+            // Radius boundary confinement: r <= 0.024 (strictly inside 0.036 inner barrel radius)
+            const distR = Math.sqrt(ar.syringeBubblePosX * ar.syringeBubblePosX + ar.syringeBubblePosZ * ar.syringeBubblePosZ);
+            if (distR > 0.024) {
+              const norm = 0.024 / distR;
+              ar.syringeBubblePosX *= norm;
+              ar.syringeBubblePosZ *= norm;
+              ar.syringeBubbleVelX *= -0.3; // Elastic wall rebound
+              ar.syringeBubbleVelZ *= -0.3;
+            }
+
+            // Height boundary confinement inside fluid column
+            const minBubbleY = fluidBottomY + 0.012;
+            const maxBubbleY = fluidTopY - 0.012;
+            if (maxBubbleY > minBubbleY) {
+              if (ar.syringeBubblePos < minBubbleY) {
+                ar.syringeBubblePos = minBubbleY;
+                ar.syringeBubbleVel *= -0.3;
+              } else if (ar.syringeBubblePos > maxBubbleY) {
+                ar.syringeBubblePos = maxBubbleY;
+                ar.syringeBubbleVel *= -0.3;
+              }
+            }
+
+            // Apply calculated physics parameters to meshes
+            if (vol <= 0.005) {
+              if (fluidMesh) fluidMesh.visible = false;
+              if (meniscusMesh) meniscusMesh.visible = false;
+              if (bubbleMesh) bubbleMesh.visible = false;
+              if (bubble2Mesh) bubble2Mesh.visible = false;
+            } else {
+              if (fluidMesh) {
+                fluidMesh.visible = true;
+                fluidMesh.position.y = fluidBottomY;
+                fluidMesh.scale.y = Math.max(0.001, fluidHeight / 0.22);
+                
+                // Clamp wave oscillation scaling so fluid cylinder stays within glass barrel
+                const osc = THREE.MathUtils.clamp(ar.syringeFluidOscillation, -0.02, 0.02);
+                fluidMesh.scale.x = 1.0 + osc;
+                fluidMesh.scale.z = 1.0 - osc;
+              }
+              if (meniscusMesh) {
+                meniscusMesh.visible = true;
+                meniscusMesh.position.y = fluidTopY - 0.002;
+
+                // Meniscus surface tilts with fluid wave / local gravity
+                const tiltX = THREE.MathUtils.clamp(-localGravity.z * 0.15 + ar.syringeFluidOscillation * 0.5, -0.2, 0.2);
+                const tiltZ = THREE.MathUtils.clamp(localGravity.x * 0.15, -0.2, 0.2);
+                meniscusMesh.rotation.x = -Math.PI / 2 + tiltX;
+                meniscusMesh.rotation.z = tiltZ;
+
+                // Scale meniscus disk so edges never protrude past 0.036 inner barrel cylinder
+                const meniscusScaleX = Math.cos(tiltZ);
+                const meniscusScaleZ = Math.cos(tiltX);
+                meniscusMesh.scale.set(meniscusScaleX, meniscusScaleZ, 1.0);
+              }
+              if (bubbleMesh) {
+                if (maxBubbleY <= minBubbleY || vol <= 0.08) {
+                  bubbleMesh.visible = false;
+                } else {
+                  bubbleMesh.visible = true;
+                  bubbleMesh.position.set(ar.syringeBubblePosX, ar.syringeBubblePos, ar.syringeBubblePosZ);
+                  bubbleMesh.scale.setScalar(Math.min(1.0, vol * 1.1));
+                }
+              }
+              if (bubble2Mesh) {
+                if (maxBubbleY <= minBubbleY || vol <= 0.12) {
+                  bubble2Mesh.visible = false;
+                } else {
+                  bubble2Mesh.visible = true;
+                  const b2Y = THREE.MathUtils.clamp(ar.syringeBubblePos - 0.035 + Math.sin(time * 6) * 0.008, minBubbleY, maxBubbleY);
+                  const b2X = THREE.MathUtils.clamp(-ar.syringeBubblePosX + Math.cos(time * 5) * 0.004, -0.02, 0.02);
+                  const b2Z = THREE.MathUtils.clamp(-ar.syringeBubblePosZ + Math.sin(time * 4) * 0.004, -0.02, 0.02);
+                  bubble2Mesh.position.set(b2X, b2Y, b2Z);
+                  bubble2Mesh.scale.setScalar(Math.min(0.8, vol * 0.9));
+                }
+              }
             }
             break;
           }
@@ -5528,9 +5478,9 @@ export function Arena3D({
               if (Math.random() < 0.75) {
                 const particlePos = currentPos.clone();
                 particlePos.y -= 0.01;
-                spawnParticles(particlePos, 0x880000, 5, 0.05, 0.003, 'BLOOD');
+                spawnParticles(particlePos, 0x480000, 5, 0.05, 0.003, 'BLOOD');
                 if (Math.random() < 0.35) {
-                  spawnParticles(particlePos, 0x550000, 3, 0.02, 0.001, 'BLOOD');
+                  spawnParticles(particlePos, 0x220000, 3, 0.02, 0.001, 'BLOOD');
                 }
               }
 
@@ -5563,22 +5513,77 @@ export function Arena3D({
             }
             break;
           }
+          case 'MEDKIT': {
+            const isPlayerUser = ar.activeItemAnimUser === 'player';
+            const basePos = isPlayerUser 
+              ? new THREE.Vector3(0, 1.2, 1.7) // Bring it up to chest level
+              : new THREE.Vector3(0, 1.8, -2.1); // Dealer chest level
+
+            let lidMesh: THREE.Object3D | null = null;
+            ar.activeItemAnimGroup.traverse(child => {
+              if (child.name === 'medkitLid') lidMesh = child;
+            });
+
+            if (elapsedSec < 0.5) {
+              // Phase 1: Bring out the medkit
+              const t = elapsedSec / 0.5;
+              const startPos = isPlayerUser ? new THREE.Vector3(0.5, 0.5, 0.9) : new THREE.Vector3(-0.6, 0.6, -1.7);
+              const currentPos = new THREE.Vector3().lerpVectors(startPos, basePos, 1 - Math.pow(1 - t, 3));
+              ar.activeItemAnimGroup.position.copy(currentPos);
+              
+              if (lidMesh) lidMesh.rotation.x = 0; // closed
+            } else if (elapsedSec < 1.0) {
+              // Phase 2: Open lid
+              ar.activeItemAnimGroup.position.copy(basePos);
+              const t = (elapsedSec - 0.5) / 0.5;
+              if (lidMesh) lidMesh.rotation.x = -Math.PI / 1.5 * (1 - Math.pow(1 - t, 2)); // open up fully
+            } else if (elapsedSec < 2.0) {
+              // Phase 3: Healing glow & physical use
+              ar.activeItemAnimGroup.position.copy(basePos);
+              if (lidMesh) lidMesh.rotation.x = -Math.PI / 1.5;
+              
+              const tPhase = (elapsedSec - 1.0);
+              // Slight shake effect as items inside are grabbed
+              ar.activeItemAnimGroup.position.y += Math.sin(tPhase * Math.PI * 6) * 0.01;
+              ar.activeItemAnimGroup.position.x += Math.cos(tPhase * Math.PI * 8) * 0.005;
+              
+              // Emit healing particles
+              if (Math.random() < 0.6) {
+                const pPos = basePos.clone().add(new THREE.Vector3(0, 0.1, 0));
+                spawnParticles(pPos, 0xffffff, 2, 0.1, 0.002, 'SPARK');
+              }
+              if (Math.random() < 0.3) {
+                const pPos = basePos.clone().add(new THREE.Vector3(0, 0.1, 0));
+                spawnParticles(pPos, 0xff2222, 1, 0.2, 0.003, 'SPARK'); // red cross colored
+              }
+              
+              if (isPlayerUser) {
+                 ar.cameraShakeIntensity = 0.15;
+                 vibrateGamepad('weak', { duration: 50 });
+              } else {
+                 ar.dealerHeadTiltFactor = -0.2; 
+                 ar.dealerMouthOpenFactor = 0.3;
+              }
+            } else if (elapsedSec < 2.5) {
+              // Phase 4: Put away / Discard
+              const tRetreat = (elapsedSec - 2.0) / 0.5;
+              const retreatPos = basePos.clone();
+              retreatPos.y -= 0.5 * tRetreat;
+              retreatPos.z += (isPlayerUser ? -0.3 : 0.3) * tRetreat;
+              ar.activeItemAnimGroup.position.copy(retreatPos);
+              ar.activeItemAnimGroup.rotation.x = Math.PI / 4 * tRetreat;
+              if (lidMesh) lidMesh.rotation.x = -Math.PI / 1.5 * (1 - Math.pow(tRetreat, 2)); // snap close
+            } else {
+              discardItemPhysics(ar.activeItemAnimGroup, ar.activeItemAnimUser || 'player');
+              ar.activeItemAnimGroup = null;
+            }
+            break;
+          }
         }
       }
 
 
-      // --- PLAYER SELF PAD & DEALER HOVER HIGHLIGHTS ---
-      const isShootSelfHovered = hoveredMesh === playerSelfPad;
 
-      if (playerSelfPad) {
-        if (isShootSelfHovered && latest.showControls) {
-          playerSelfPad.scale.set(1.05, 1.4, 1.05); // slightly rise and swell!
-          etchMat.color.setHex(0xff3333); // flaring bright glowing red!
-        } else {
-          playerSelfPad.scale.set(1.0, 1.0, 1.0);
-          etchMat.color.setHex(0x771111);
-        }
-      }
 
 
       // --- SCREENSPACE ACCURATE HOVER OVERLAYS SYSTEM ---
@@ -5587,7 +5592,7 @@ export function Arena3D({
       const popupDescEl = popupDescRef.current;
 
       let activeTargetMesh: THREE.Object3D | null = null;
-      let activeTargetType: 'ITEM' | 'SHOOT_SELF' | 'SHOOT_DEALER' | 'SHOP_ITEM' = 'ITEM';
+      let activeTargetType: 'ITEM' | 'SHOP_ITEM' = 'ITEM';
       let activeTargetName = '';
       let activeTargetDesc = '';
 
@@ -5603,29 +5608,23 @@ export function Arena3D({
             const itemName = latest.player.items[idx];
             if (!itemName) {
               activeTargetName = 'EMPTY SLOT';
-              activeTargetDesc = 'ERROR - NO ITEM DETECTED. PLEASE CYCLE OFF.';
+              activeTargetDesc = 'ERROR - NO ITEM DETECTED.';
             } else {
-              activeTargetName = `USE ${itemName}`;
+              const meta = ITEM_METADATA[itemName];
+              const rarityTag = meta ? ` [${meta.rarity}]` : '';
+              activeTargetName = `USE ${meta ? meta.name : itemName}${rarityTag}`;
               const buyPrompt = !!updateGamepads() ? ' [A] TO USE' : '';
-              activeTargetDesc = (ITEM_DESCS[itemName] || '') + buyPrompt + touchPrompt;
+              activeTargetDesc = (meta ? meta.description.toUpperCase() : ITEM_DESCS[itemName] || '') + buyPrompt + touchPrompt;
             }
-          } else if (hoveredMesh.userData.isShootSelfButton) {
-            activeTargetType = 'SHOOT_SELF';
-            activeTargetName = 'SHOOT YOURSELF';
-            const buyPrompt = !!updateGamepads() ? ' [LT] TO FIRE' : '';
-            activeTargetDesc = 'POINT THE REVOLVER DIRECTLY AT YOUR TEMPLE. IF IT IS A BLANK, TURN CONTINUES.' + buyPrompt + touchPrompt;
-          } else if (hoveredMesh.userData.isShootDealerButton) {
-            activeTargetType = 'SHOOT_DEALER';
-            activeTargetName = 'SHOOT THE DEALER';
-            const buyPrompt = !!updateGamepads() ? ' [RT] TO FIRE' : '';
-            activeTargetDesc = 'AIM AND DISCHARGE THE CHAMBER AT THE HOODED DEALER.' + buyPrompt + touchPrompt;
           } else if (hoveredMesh.userData.isShopItem) {
              activeTargetType = 'SHOP_ITEM';
              const { type, cost } = hoveredMesh.userData;
+             const meta = ITEM_METADATA[type as ItemType];
+             const rarityTag = meta ? ` [${meta.rarity}]` : '';
              const isAffordable = latest.bloodCurrency >= cost;
-             activeTargetName = `${type} (${isAffordable ? 'AFFORDABLE' : 'TOO EXPENSIVE'})`;
+             activeTargetName = `${meta ? meta.name : type}${rarityTag} (${isAffordable ? 'AFFORDABLE' : 'TOO EXPENSIVE'})`;
              const buyPrompt = !!updateGamepads() ? ' [A] TO PURCHASE' : '';
-             activeTargetDesc = `${ITEM_DESCS[type]}. COST: ${cost} BLOOD.${buyPrompt}${touchPrompt}`;
+             activeTargetDesc = `${meta ? meta.description.toUpperCase() : ITEM_DESCS[type]}. COST: ${cost} BLOOD.${buyPrompt}${touchPrompt}`;
           }
         }
       }
@@ -5658,10 +5657,6 @@ export function Arena3D({
           // Fine-tuned custom visual offsets based on type for perfect alignments
           if (activeTargetType === 'ITEM') {
             targetWorldPos.y += 0.42;
-          } else if (activeTargetType === 'SHOOT_SELF') {
-            targetWorldPos.y += 0.28;
-          } else if (activeTargetType === 'SHOOT_DEALER') {
-            targetWorldPos.y += 1.55; // above dealer hood
           } else if (activeTargetType === 'SHOP_ITEM') {
             targetWorldPos.y += 0.35; 
           }
@@ -5745,76 +5740,96 @@ export function Arena3D({
             }
           }
 
-          // Align blood/sparks/bullet mesh rotation with its trajectory vector
-          if ((pt.type === 'BLOOD' || pt.type === 'SPARK' || pt.type === 'BULLET') && pt.velocity.lengthSq() > 0.001) {
+          // Align blood/sparks/bullet mesh rotation with its trajectory vector & directional motion blur stretch
+          if ((pt.type === 'BLOOD' || pt.type === 'SPARK' || pt.type === 'BULLET') && pt.velocity.lengthSq() > 0.0001) {
             const dir = pt.velocity.clone().normalize();
             pt.mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+            if (pt.type === 'BLOOD') {
+              const speed = pt.velocity.length();
+              const sz = pt.mesh.userData.size || 0.016;
+              pt.mesh.scale.set(sz, sz * (1.2 + Math.min(3.0, speed * 20.0)), sz);
+            }
           }
 
           // Hit table surface or floor detection
-          // Table top surface level is y = 0.552 (Table box bounds: X [-3.25, 3.25], Z [-2.8, 1.6])
+          const pWorld = pt.mesh.position.clone();
+
+          // Table surface Y is exactly 0.553. Check collision strictly when particle passes through table top plane.
           const hitsTableTop = (
-            pt.mesh.position.y <= 0.552 &&
+            pt.mesh.position.y <= 0.558 &&
+            pt.mesh.position.y >= 0.38 &&
             Math.abs(pt.mesh.position.x) <= 3.25 &&
-            pt.mesh.position.z >= -2.8 &&
-            pt.mesh.position.z <= 1.6
+            pt.mesh.position.z >= -2.80 &&
+            pt.mesh.position.z <= 1.60
           );
-          const hitsFloor = pt.mesh.position.y <= 0.012;
+
+          // Floor surface Y is -0.89 (floor mesh position y = -0.9)
+          const hitsFloor = !hitsTableTop && (pt.mesh.position.y <= -0.88);
 
           if (hitsTableTop || hitsFloor) {
-            const surfaceY = hitsTableTop ? 0.553 : 0.012;
+            const surfaceY = hitsTableTop ? 0.553 : -0.89;
 
             if (pt.type === 'BLOOD' || pt.type === 'LIQUID') {
-              const impactVelSq = pt.velocity.lengthSq();
-              const impactPos = pt.mesh.position.clone();
-              impactPos.y = surfaceY;
-
-              pt.mesh.position.copy(impactPos);
-              pt.hasLanded = true;
-              pt.velocity.set(0, 0, 0);
-
-              // Squash blood/liquid drops into pixelated splats/stains on the table wood!
-              pt.mesh.rotation.set(Math.PI / 2, 0, Math.floor(Math.random() * 4) * (Math.PI / 2)); 
-              const pxStep = 0.012;
-              const wPx = Math.floor(2 + Math.random() * 5) * pxStep;
-              const lPx = Math.floor(2 + Math.random() * 5) * pxStep;
-              pt.mesh.scale.set(wPx, 0.002, lPx);
-              pt.mesh.userData.baseScaleX = wPx;
-              pt.mesh.userData.baseScaleZ = lPx;
-              pt.maxLife = 3600 + Math.random() * 2400; // Persist for up to 100 seconds!
-
-              // Secondary satellite pixelated splatters on impact
-              if (hitsTableTop && impactVelSq > 0.0015 && activeParticles.length < 850) {
-                const satCount = 2 + Math.floor(Math.random() * 4);
-                for (let k = 0; k < satCount; k++) {
-                  const satMat = Math.random() < 0.65 ? sharedDarkBloodMat : sharedBloodMat;
-                  const satMesh = new THREE.Mesh(unitBoxGeo, satMat);
-                  
-                  const offsetDist = 0.02 + Math.random() * 0.14;
-                  const offsetAngle = Math.random() * Math.PI * 2;
-                  const sx = impactPos.x + Math.cos(offsetAngle) * offsetDist;
-                  const sz = impactPos.z + Math.sin(offsetAngle) * offsetDist;
-
-                  satMesh.position.set(sx, surfaceY, sz);
-                  satMesh.rotation.set(Math.PI / 2, 0, Math.floor(Math.random() * 4) * (Math.PI / 2));
-                  
-                  const satW = (1 + Math.floor(Math.random() * 3)) * 0.008;
-                  const satL = (1 + Math.floor(Math.random() * 3)) * 0.008;
-                  satMesh.scale.set(satW, 0.002, satL);
-
-                  scene.add(satMesh);
-                  activeParticles.push({
-                    mesh: satMesh,
-                    velocity: new THREE.Vector3(0, 0, 0),
-                    life: 0,
-                    maxLife: 3000 + Math.random() * 2000,
-                    gravity: 0,
-                    type: 'BLOOD',
-                    hasLanded: true,
-                    bounceCount: 0
-                  });
-                }
+              const speed = pt.velocity.length();
+              const trajAngle = Math.atan2(pt.velocity.x, pt.velocity.z || 0.001);
+              let impactWorldPos = new THREE.Vector3(pWorld.x, surfaceY, pWorld.z);
+              
+              let ptColor = 0x2a0000;
+              if (pt.mesh.material && 'color' in pt.mesh.material) {
+                 ptColor = (pt.mesh.material as any).color.getHex();
               }
+
+              const clampToTable = (pos: THREE.Vector3) => {
+                if (hitsTableTop) {
+                  pos.x = Math.max(-3.18, Math.min(3.18, pos.x));
+                  pos.z = Math.max(-2.73, Math.min(1.53, pos.z));
+                }
+                return pos;
+              };
+
+              if (hitsTableTop) {
+                impactWorldPos = clampToTable(impactWorldPos);
+              }
+
+              const pxStep = hitsFloor ? 0.065 : 0.042;
+              const wPx = pxStep * (2.8 + Math.random() * 2.2);
+              const lPx = pxStep * (3.0 + Math.min(5.0, speed * 35));
+
+              // 1. Core Blood Octagonal Body
+              addLandedSplat('CORE', new THREE.Vector3(impactWorldPos.x, surfaceY + 0.0004, impactWorldPos.z), trajAngle + (Math.floor(Math.random() * 4) * (Math.PI / 2)), new THREE.Vector3(wPx * 1.15, 0.001, lPx * 1.15), ptColor);
+
+              // 2. Trajectory Stepped Drips
+              const dripCount = 2 + Math.floor(Math.random() * 3);
+              for (let d = 0; d < dripCount; d++) {
+                const dW = wPx * (0.35 + Math.random() * 0.35);
+                const dL = lPx * (0.4 + Math.random() * 0.5);
+                const offZ = (lPx * 0.45) + (d * dL * 0.75);
+                const offX = (Math.random() - 0.5) * wPx * 0.5;
+                const dripPos = impactWorldPos.clone().add(new THREE.Vector3(offX, 0.0005, offZ).applyAxisAngle(new THREE.Vector3(0, 1, 0), trajAngle));
+                addLandedSplat('CORE', clampToTable(dripPos), trajAngle, new THREE.Vector3(dW, 0.002, dL), ptColor);
+              }
+
+              // 3. Satellite Micro-Pixel Voxels
+              const satCount = 3 + Math.floor(Math.random() * 4);
+              for (let s = 0; s < satCount; s++) {
+                const sW = pxStep * (0.8 + Math.random() * 1.2);
+                const sL = pxStep * (0.8 + Math.random() * 1.2);
+                const dist = wPx * (0.8 + Math.random() * 1.1);
+                const angle = Math.random() * Math.PI * 2;
+                const satPos = impactWorldPos.clone().add(new THREE.Vector3(Math.cos(angle) * dist, 0.0005, Math.sin(angle) * dist));
+                addLandedSplat('CORE', clampToTable(satPos), angle, new THREE.Vector3(sW, 0.002, sL), ptColor);
+              }
+
+              // Recycle airborne droplet mesh
+              if (pt.mesh.parent) pt.mesh.parent.remove(pt.mesh);
+              if (pt.mesh.userData?.isPooled) {
+                pt.mesh.visible = false;
+                airborneBloodPool.push(pt.mesh);
+              } else {
+                disposeNode(pt.mesh);
+              }
+              activeParticles.splice(i, 1);
+              continue;
             } else if (pt.type === 'BULLET') {
               // Bullet impact -> sparks & wood shrapnel
               spawnParticles(pt.mesh.position.clone(), 0xffaa00, 25, 0.35, 0.002, 'SPARK');
@@ -5824,6 +5839,64 @@ export function Arena3D({
             } else if (pt.type === 'SPARK' || pt.type === 'SHELL' || pt.type === 'DEBRIS') {
               // Bouncing casing / debris physics
               pt.mesh.position.y = surfaceY;
+
+              // Shatter glass whiskey bottle on first impact
+              if (pt.type === 'DEBRIS' && pt.mesh.userData?.itemType === 'WHISKEY' && pt.bounceCount === 0) {
+                import('../audio').then(a => a.playGlassBreakSound());
+                
+                // Realistically shatter into glass shards
+                const numShards = 8 + Math.floor(Math.random() * 8);
+                const glassMat = new THREE.MeshStandardMaterial({
+                  color: 0x4a2a10,
+                  roughness: 0.1,
+                  metalness: 0.1,
+                  transparent: true,
+                  opacity: 0.8
+                });
+                
+                for (let s = 0; s < numShards; s++) {
+                  // Random shard geometry
+                  const w = 0.02 + Math.random() * 0.06;
+                  const h = 0.02 + Math.random() * 0.08;
+                  const d = 0.01 + Math.random() * 0.03;
+                  const shardGeo = new THREE.BoxGeometry(w, h, d);
+                  // Give it some random jagged vertices if possible, but box is fine if rotated
+                  const shardMesh = new THREE.Mesh(shardGeo, glassMat);
+                  shardMesh.position.copy(pt.mesh.position);
+                  shardMesh.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
+                  
+                  activeParticles.push({
+                    mesh: shardMesh as any,
+                    velocity: new THREE.Vector3(
+                      (Math.random() - 0.5) * 0.25,
+                      Math.random() * 0.15,
+                      (Math.random() - 0.5) * 0.25
+                    ).add(pt.velocity.clone().multiplyScalar(0.3)),
+                    rotVelocity: new THREE.Vector3(
+                      (Math.random() - 0.5) * 0.5,
+                      (Math.random() - 0.5) * 0.5,
+                      (Math.random() - 0.5) * 0.5
+                    ),
+                    life: 0,
+                    maxLife: 2.0 + Math.random(),
+                    gravity: 0.0035,
+                    type: 'DEBRIS',
+                    hasLanded: false,
+                    bounceCount: 0
+                  });
+                  scene.add(shardMesh);
+                }
+
+                // Splash whiskey liquid
+                spawnParticles(pt.mesh.position.clone(), 0x8c3409, 25, 0.18, 0.002, 'LIQUID');
+                
+                if (pt.mesh.parent) pt.mesh.parent.remove(pt.mesh);
+                disposeNode(pt.mesh);
+                
+                activeParticles.splice(i, 1);
+                continue;
+              }
+
               pt.velocity.y *= -0.45; // bounce dampening
               pt.velocity.x *= 0.65;
               pt.velocity.z *= 0.65;
@@ -5850,14 +5923,19 @@ export function Arena3D({
             }
           }
         } else if (pt.type === 'BLOOD' || pt.type === 'LIQUID') {
-          // Slow initial creep / oozing puddle expansion for first 40 frames, then congeal into dark dried blood crust
-          if (pt.life < 40) {
-            pt.mesh.scale.x += 0.0002 * deltaScale;
-            pt.mesh.scale.z += 0.0002 * deltaScale;
-          } else if (pt.life === 40 || pt.life === 41) {
-            // Darken landed blood to congealed dried dark crimson crust
-            if (pt.mesh.material !== sharedDarkBloodMat) {
-              pt.mesh.material = sharedDarkBloodMat;
+          // Slow initial creep / oozing puddle expansion for first 35 frames
+          if (pt.life < 35) {
+            pt.mesh.scale.x += 0.00015 * deltaScale;
+            pt.mesh.scale.z += 0.00015 * deltaScale;
+          }
+
+          // Dynamic falling droplets from table edge lip stains
+          if (pt.mesh.userData?.isTableEdgeDrip && Math.random() < 0.018 * deltaScale && activeParticles.length < 850) {
+            const edgeP = pt.mesh.userData.edgePos as THREE.Vector3;
+            if (edgeP) {
+              const dripOrigin = edgeP.clone();
+              dripOrigin.y -= 0.15; // Start from bottom edge of table apron face
+              spawnParticles(dripOrigin, 0x2a0000, 1, 0.01, 0.003, 'BLOOD');
             }
           }
           
@@ -5870,44 +5948,57 @@ export function Arena3D({
             }
             const baseX = pt.mesh.userData.scaleBeforeDecayX;
             const baseZ = pt.mesh.userData.scaleBeforeDecayZ;
-            pt.mesh.scale.set(baseX * shrink, 0.002 * shrink, baseZ * shrink);
+            pt.mesh.scale.set(baseX * Math.max(0, shrink), 1.0, baseZ * Math.max(0, shrink));
           }
         }
 
         // Custom realistic gaseous drift & expansion for drifting smoke
         if (pt.type === 'SMOKE') {
-          // Smoke experiences a delicate atmospheric draft from the moving barrel
           const ageRatio = pt.life / pt.maxLife;
-          const followFactor = Math.pow(Math.max(0.0, 1.0 - ageRatio), 2.5) * 0.16;
+
+          // Smoke experiences a delicate atmospheric draft from the moving barrel
+          const followFactor = Math.pow(Math.max(0.0, 1.0 - ageRatio), 2.5) * 0.12;
           pt.mesh.position.addScaledVector(muzzleDelta, followFactor);
 
-          // Smoke expands into big soft clouds as it dissipates and then scales to 0
-          const expansion = 1.0 + ageRatio * 6.5;
-          const shrinkFactor = ageRatio > 0.75 ? (1.0 - ageRatio) / 0.25 : 1.0;
+          // Smooth gaseous cloud expansion into soft atmospheric wisps
+          const expansion = 1.0 + Math.pow(ageRatio, 0.7) * 3.5;
           
           const initX = pt.mesh.userData.initialScaleX || pt.mesh.userData.initialScale || 0.024;
           const initY = pt.mesh.userData.initialScaleY || pt.mesh.userData.initialScale || 0.024;
           const initZ = pt.mesh.userData.initialScaleZ || pt.mesh.userData.initialScale || 0.024;
           
           pt.mesh.scale.set(
-            initX * expansion * shrinkFactor,
-            initY * expansion * shrinkFactor,
-            initZ * expansion * shrinkFactor
+            initX * expansion,
+            initY * expansion,
+            initZ * expansion
           );
+
+          // Smooth realistic alpha dissipation: fade in over first 12% of life, then smoothly fade out to 0
+          let alpha = 1.0;
+          if (ageRatio < 0.12) {
+            alpha = ageRatio / 0.12;
+          } else {
+            alpha = Math.pow(1.0 - (ageRatio - 0.12) / 0.88, 1.6);
+          }
+
+          if (pt.mesh.material && 'opacity' in pt.mesh.material) {
+            const baseOp = pt.mesh.userData.baseOpacity || 0.12;
+            (pt.mesh.material as THREE.Material).opacity = Math.max(0, baseOp * alpha);
+          }
 
           // Dynamic slow turbulent swirling rotation
           pt.mesh.rotation.x += (pt.mesh.userData.rotSpeedX || 0.01) * deltaScale;
           pt.mesh.rotation.y += (pt.mesh.userData.rotSpeedY || 0.01) * deltaScale;
           pt.mesh.rotation.z += (pt.mesh.userData.rotSpeedZ || 0.01) * deltaScale;
 
-          // Drift smoke on a realistic wavy vortex path
-          pt.velocity.x += Math.sin(pt.life * 0.07 + pt.mesh.position.y * 14) * 0.00022 * deltaScale;
-          pt.velocity.z += Math.cos(pt.life * 0.05 + pt.mesh.position.y * 10) * 0.00022 * deltaScale;
+          // Drift smoke on a delicate wavy atmospheric path
+          pt.velocity.x += Math.sin(pt.life * 0.05 + pt.mesh.position.y * 10) * 0.00012 * deltaScale;
+          pt.velocity.z += Math.cos(pt.life * 0.04 + pt.mesh.position.y * 8) * 0.00012 * deltaScale;
 
-          // Drag/friction slowing down the initial high ejection shockwave velocity
-          pt.velocity.x *= Math.pow(0.94, deltaScale);
-          pt.velocity.z *= Math.pow(0.94, deltaScale);
-          pt.velocity.y *= Math.pow(0.96, deltaScale);
+          // Air drag deceleration
+          pt.velocity.x *= Math.pow(0.93, deltaScale);
+          pt.velocity.z *= Math.pow(0.93, deltaScale);
+          pt.velocity.y *= Math.pow(0.95, deltaScale);
         }
         
         if (pt.type === 'DEBRIS' || pt.type === 'SHELL') {
@@ -5989,8 +6080,8 @@ export function Arena3D({
         if (ar.deathAnimStartTime === 0) {
           ar.deathAnimStartTime = Date.now();
           // Instant visceral blood spray burst right in front of POV camera
-          spawnParticles(new THREE.Vector3(camera.position.x, camera.position.y - 0.2, camera.position.z - 0.3), 0x990000, 70, 0.35, -0.003, 'BLOOD');
-          spawnParticles(new THREE.Vector3(camera.position.x + 0.1, camera.position.y - 0.1, camera.position.z - 0.4), 0xaa0000, 45, 0.28, -0.002, 'BLOOD');
+          spawnParticles(new THREE.Vector3(camera.position.x, camera.position.y - 0.2, camera.position.z - 0.3), 0x4a0000, 70, 0.35, -0.003, 'BLOOD');
+          spawnParticles(new THREE.Vector3(camera.position.x + 0.1, camera.position.y - 0.1, camera.position.z - 0.4), 0x520000, 45, 0.28, -0.002, 'BLOOD');
           vibrateGamepad('jolt', { duration: 300, weak: 1.0, strong: 1.0 });
           ar.cameraShakeIntensity = 1.5;
         }
@@ -6115,136 +6206,62 @@ export function Arena3D({
         const parallaxX = ar.smoothMouseX * 0.38;
         const parallaxY = ar.smoothMouseY * 0.24;
 
-// During LOADING the bench close-up below steers the camera directly.
-        if (latest.gameState !== 'LOADING') {
-          camera.position.copy(stateRef.current.camPosVec);
-          camera.position.x += handSwayX + shakeX + parallaxX;
-          camera.position.y += handSwayY + shakeY + parallaxY;
-          camera.position.z += shakeZ + ar.cameraKickZ;
+        camera.position.copy(stateRef.current.camPosVec);
+        camera.position.x += handSwayX + shakeX + parallaxX;
+        camera.position.y += handSwayY + shakeY + parallaxY;
+        camera.position.z += shakeZ + ar.cameraKickZ;
 
-          if (stateRef.current.lookTargetVec) {
-            stateRef.current.lookTargetVec.x += ar.smoothMouseX * 0.65 * damp(0.12);
-            stateRef.current.lookTargetVec.y += ar.smoothMouseY * 0.45 * damp(0.12);
-          }
+        if (stateRef.current.lookTargetVec) {
+          stateRef.current.lookTargetVec.x += ar.smoothMouseX * 0.65 * damp(0.12);
+          stateRef.current.lookTargetVec.y += ar.smoothMouseY * 0.45 * damp(0.12);
         }
       }
 
-      // --- INTERACTIVE MANUAL LOADING: BENCH POSE, COUP DE GRÂCE DRAG & SPIN ---
+      // --- LOADING ANIMATION: CYLINDER RELOAD ---
       if (latest.gameState === 'LOADING') {
-        // Lazily compute the propped-up "bench" pose from the resting pose so
-        // the cylinder axis stands vertical (chamber mouths facing up).
-        if (!ar.propQuat) {
-          const baseQ = new THREE.Quaternion().setFromEuler(initialGunRot);
-          const benchA = new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI / 2, Math.PI / 2, 0));
-          ar.propQuat = new THREE.Quaternion().multiplyQuaternions(benchA, baseQ);
-          // Anchor by the cylinder CENTER so the drum stands clear of the
-          // tabletop with the chamber mouths facing up (no table clipping).
-          const cylBase = new THREE.Vector3(0, 0.12, -0.05).applyQuaternion(baseQ).applyQuaternion(benchA);
-          ar.propPos = new THREE.Vector3(0, 0.97, -0.32).sub(cylBase);
-        }
-        gunGroup.position.lerp(ar.propPos, damp(0.09));
-        gunGroup.quaternion.slerp(ar.propQuat, damp(0.09));
-
-        // Build the ammo block + rounds the first frame a loading begins.
-        if (!ar.loadingSceneBuilt) {
-          if ((window as any).__rrForceRun === true) console.log('[LOAD-BUILD] count=', latest.bulletTargetCount, 'ammoBlock id=', (ammoBlock as any).id);
-          (window as any).__rrDbgAmmoId = (ammoBlock as any).id;
-          ar.loadingSceneBuilt = true;
-          ar.filledSlots = [false, false, false, false, false, false];
-          ar.spinAngle = 0;
-          ar.spinVel = 0;
-          ar.spinSettled = false;
-          ar.spinRatchetSector = 0;
-          ar.carriedBulletIdx = -1;
-          ar.isDraggingBullet = false;
-          ar.highlightedSlot = -1;
-          ar.insertAnims = [];
-          ar.returnAnims = [];
-          if (ar.spinProxy) ar.spinProxy.rotation.z = 0;
-          ammoBlock.updateMatrixWorld(true);
-          ammoBlock.visible = true;
-          const count = latest.bulletTargetCount;
-          ar.loadBullets.forEach((b, i) => {
-            b.visible = i < count;
-            if (b.visible) {
-              b.position.copy(blockSlotLocal(i));
-              b.rotation.y = Math.random() * Math.PI * 2;
-              b.rotation.z = 0;
+        if (ar.loadingAnimStartTime === 0) {
+            ar.loadingAnimStartTime = Date.now();
+            ar.bulletLoadedFlags = [false, false, false, false, false, false];
+            if (!ar.isFadingBlood) {
+              clearBloodSplatters();
             }
-          });
-          if (ar.slotHighlight) ar.slotHighlight.visible = false;
         }
-
-        // Cursor-tracking highlight of the chamber being aimed at
-        placeHighlight();
-
-        // Bullet insert / snap-back tweens
-        if (ar.insertAnims.length) {
-          ar.insertAnims = ar.insertAnims.filter((a) => {
-            a.t += rawDt / 0.32;
-            if (a.t >= 1) {
-              a.bullet.visible = false;
-              return false;
+        const rawLoad = (Date.now() - ar.loadingAnimStartTime) / 1000;
+        const loadElapsed = rawLoad * 1.3;
+        
+        // Raising the gun to center view
+        if (loadElapsed < 0.5) {
+            const t = loadElapsed / 0.5;
+            gunGroup.position.y = initialGunPos.y + t * 0.6;
+            gunGroup.rotation.x = initialGunRot.x - t * 0.7;
+        } else if (loadElapsed < 2.5) {
+            // Loading bullets sequence
+            const bulletTime = (loadElapsed - 0.5) / 1.7; // load sequence duration
+            const bulletIdx = Math.floor(bulletTime * 6);
+            
+            if (bulletIdx >= 0 && bulletIdx < 6 && !ar.bulletLoadedFlags[bulletIdx]) {
+                ar.bulletLoadedFlags[bulletIdx] = true;
+                playBulletLoad();
+                spawnParticles(gunGroup.position, 0xffcc00, 5, 0.05, 0.001, 'SPARK');
+                // Sharp, quick visceral jolt when the bullet slides into the cylinder
+                vibrateGamepad('jolt', { duration: 45, weak: 0.1, strong: 1.0 });
             }
-            const t = a.t < 0.6 ? (a.t / 0.6) : 1; // slide in, then rest in the hole
-            a.bullet.position.lerpVectors(a.from, a.to, t);
-            a.bullet.rotation.z = 0;
-            return true;
-          });
+            
+            // Jitter/Recoil on each bullet load
+            const jitter = Math.sin(bulletTime * Math.PI * 12) * 0.02;
+            gunGroup.position.y = initialGunPos.y + 0.6 + jitter;
+            
+            // Spinning cylinder during load
+            revolverCylinderMesh.rotation.z += 0.15 * deltaScale;
+            drumMesh.rotation.y += 0.15 * deltaScale;
+        } else if (loadElapsed < 3.0) {
+            // Lowering back down
+            const lowerT = (loadElapsed - 2.5) / 0.5;
+            gunGroup.position.y = initialGunPos.y + 0.6 - (lowerT * 0.6);
+            gunGroup.rotation.x = (initialGunRot.x - 0.7) + (lowerT * 0.7);
         }
-        if (ar.returnAnims.length) {
-          ar.returnAnims = ar.returnAnims.filter((a) => {
-            a.t += rawDt / 0.25;
-            if (a.t >= 1) return false;
-            a.bullet.position.lerpVectors(a.from, a.to, a.t);
-            return true;
-          });
-        }
-
-        // Manual cylinder spin physics (phase 'spin')
-        if (latest.loadingPhase === 'spin' && !ar.spinSettled) {
-          if (Math.abs(ar.spinVel) > 0.02) {
-            ar.spinVel *= Math.exp(-2.0 * rawDt);
-            ar.spinAngle += ar.spinVel * rawDt;
-            // Steel ratchet clicks as chambers pass the barrel
-            const sector = Math.floor(((ar.spinAngle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2) / (Math.PI / 3));
-            if (sector !== ar.spinRatchetSector) {
-              ar.spinRatchetSector = sector;
-              playEmptyClick();
-              vibrateGamepad('click');
-            }
-          } else {
-            // Settled: snap to the nearest chamber and hand the index to the engine.
-            ar.spinSettled = true;
-            ar.spinVel = 0;
-            const sector = ((ar.spinAngle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
-            let idx = Math.round(sector / (Math.PI / 3)) % 6;
-            ar.spinAngle = idx * (Math.PI / 3);
-            playEmptyClick();
-            onSpinComplete(idx);
-          }
-        }
-
-        // Surveying bench shot: pulled back so the whole revolver + ammo block sit
-        // comfortably in frame — no harsh zoom, no table clipping.
-        const loadCam = new THREE.Vector3(0.1, 1.7, 2.3);
-        camera.position.lerp(loadCam, damp(0.07));
-        stateRef.current.camPosVec.lerp(loadCam, damp(0.07));
-        stateRef.current.lookTargetVec.copy(new THREE.Vector3(0, 0.92, -0.28));
       } else {
-        // Leaving loading: hide the bench props; the idle/shooting animation
-        // code eases the revolver back onto the table.
-        if (ar.loadingSceneBuilt) {
-          if ((window as any).__rrForceRun === true) console.log('[LOAD-EXIT] gameState=', latest.gameState, 'ammoBlock id=', (ammoBlock as any).id);
-          ar.loadingSceneBuilt = false;
-          ammoBlock.visible = false;
-          ar.loadBullets.forEach((b) => { b.visible = false; });
-          if (ar.slotHighlight) ar.slotHighlight.visible = false;
-        }
-        ar.spinGestureActive = false;
-        ar.isDraggingBullet = false;
-        ar.spinVel = 0;
-        stateRef.current.lookTargetVec = null;
+        ar.loadingAnimStartTime = 0;
       }
 
       // --- DYNAMIC TV HEALTH MONITORS AND INDENT GLOW UPDATES ---
@@ -6301,9 +6318,18 @@ export function Arena3D({
       }
 
       if (renderPipeline) {
-        renderPipeline.render();
+        try {
+          renderPipeline.render();
+        } catch (err) {
+          console.warn('RenderPipeline frame error during settings transition:', err);
+          try {
+            renderer.render(scene, camera);
+          } catch (e) {}
+        }
       } else if (renderer) {
-        renderer.render(scene, camera);
+        try {
+          renderer.render(scene, camera);
+        } catch (e) {}
       }
     };
 
@@ -6314,14 +6340,16 @@ export function Arena3D({
       resizeObserver.disconnect();
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
-      window.removeEventListener('mousedown', handleMouseDown);
       window.removeEventListener('keydown', handleKeyDown);
       document.body.style.cursor = '';
+      if (currentPostprocessingNode && currentPostprocessingNode !== scenePass && typeof currentPostprocessingNode.dispose === 'function') {
+        try { currentPostprocessingNode.dispose(); } catch (e) {}
+      }
       if (renderPipeline && typeof renderPipeline.dispose === 'function') {
         try { renderPipeline.dispose(); } catch (e) {}
       }
       if (renderer) {
-        renderer.dispose();
+        try { renderer.dispose(); } catch (e) {}
       }
     };
   }, []);
@@ -6356,29 +6384,75 @@ export function Arena3D({
         }}
       />
 
-      {/* DYNAMIC SCREEN BLOOD SPLATTER OVERLAY */}
+      {/* DYNAMIC SCREEN PIXELATED BLOOD SPLATTER OVERLAY WITH ANIMATED DRIPS */}
       <div className="absolute inset-0 pointer-events-none overflow-hidden z-[120]">
         {screenSplats.map(splat => (
           <motion.div
             key={splat.id}
             initial={{ opacity: 0, scale: 0.2 }}
-            animate={{ opacity: [0, 1, 1, 0.4, 0], scale: splat.scale }}
-            transition={{ duration: 3.5, ease: "easeOut" }}
-            className="absolute rounded-full"
+            animate={{ opacity: [0, 1, 1, 0.6, 0], scale: splat.scale }}
+            transition={{ duration: 3.8, ease: "easeOut" }}
+            className="absolute pointer-events-none"
             style={{
               left: `${splat.x}%`,
               top: `${splat.y}%`,
-              width: '180px',
-              height: '180px',
-              background: 'radial-gradient(circle, #600 0%, #300 40%, transparent 70%)',
-              filter: 'blur(15px) contrast(150%)',
-              transform: `rotate(${splat.rotation}deg)`,
-              mixBlendMode: 'multiply'
+              width: '130px',
+              height: '130px',
+              transform: `rotate(${Math.floor(splat.rotation / 90) * 90}deg)`,
             }}
           >
-            {/* Inner drizzles for realism */}
-            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 w-2 h-32 bg-red-950/40 blur-md rounded-full transform origin-top animate-pulse" style={{ rotate: '5deg' }} />
-            <div className="absolute top-1/2 left-1/3 -translate-x-1/2 w-1 h-24 bg-red-900/30 blur-sm rounded-full transform origin-top" style={{ rotate: '-12deg' }} />
+            {/* Core Low-Poly Octagonal Pixel Splat */}
+            <div 
+              className="absolute inset-0 bg-[#2a0000]"
+              style={{
+                clipPath: 'polygon(30% 0%, 70% 0%, 100% 30%, 100% 70%, 70% 100%, 30% 100%, 0% 70%, 0% 30%)'
+              }}
+            >
+              {/* Inner Pixel Center */}
+              <div 
+                className="absolute inset-2 bg-[#2a0000]"
+                style={{
+                  clipPath: 'polygon(25% 0%, 75% 0%, 100% 25%, 100% 75%, 75% 100%, 25% 100%, 0% 75%, 0% 25%)'
+                }}
+              />
+            </div>
+            
+            {/* ANIMATED PIXELATED BLOOD DRIP STREAMS */}
+            {/* Main Center Drip Stream */}
+            <motion.div 
+              animate={{ height: ['0px', '40px', '90px', '140px', '180px'], opacity: [0, 1, 1, 0.85, 0] }}
+              transition={{ duration: 3.4, times: [0, 0.15, 0.4, 0.7, 1], ease: 'linear' }}
+              className="absolute left-[38%] top-[85%] w-[18px] bg-[#2a0000]" 
+            />
+            {/* Left Secondary Drip Stream */}
+            <motion.div 
+              animate={{ height: ['0px', '25px', '60px', '95px'], opacity: [0, 1, 1, 0] }}
+              transition={{ duration: 2.9, times: [0, 0.2, 0.6, 1], ease: 'linear' }}
+              className="absolute left-[18%] top-[70%] w-[14px] bg-[#2a0000]" 
+            />
+            {/* Right Secondary Drip Stream */}
+            <motion.div 
+              animate={{ height: ['0px', '20px', '45px', '75px'], opacity: [0, 1, 1, 0] }}
+              transition={{ duration: 2.6, times: [0, 0.2, 0.6, 1], ease: 'linear' }}
+              className="absolute left-[68%] top-[80%] w-[12px] bg-[#2a0000]" 
+            />
+
+            {/* DETACHED FALLING PIXELATED BLOOD DROPS */}
+            <motion.div 
+              animate={{ y: [0, 30, 70, 120, 180], opacity: [0, 1, 1, 1, 0] }}
+              transition={{ duration: 3.1, times: [0, 0.2, 0.45, 0.75, 1], ease: 'linear' }}
+              className="absolute left-[40%] top-[100%] w-[10px] h-[10px] bg-[#2a0000]" 
+            />
+            <motion.div 
+              animate={{ y: [0, 22, 52, 90, 140], opacity: [0, 1, 1, 1, 0] }}
+              transition={{ duration: 2.7, times: [0, 0.2, 0.45, 0.75, 1], ease: 'linear' }}
+              className="absolute left-[20%] top-[85%] w-[8px] h-[8px] bg-[#2a0000]" 
+            />
+
+            {/* Satellite Pixel Voxels */}
+            <div className="absolute -top-4 left-2 w-[12px] h-[12px] bg-[#2a0000]" />
+            <div className="absolute top-8 -right-5 w-[16px] h-[10px] bg-[#2a0000]" />
+            <div className="absolute -bottom-6 right-4 w-[10px] h-[14px] bg-[#2a0000]" />
           </motion.div>
         ))}
       </div>
@@ -6427,6 +6501,38 @@ export function Arena3D({
         </motion.div>
       )}
 
+      {/* EDGE SHOOT DETECTION ZONES */}
+      {player.health > 0 && gameState === 'PLAYER_TURN' && showControls && !isLookingAtShopRef.current && (
+        <>
+          {/* Top Edge: Shoot Dealer */}
+          <div 
+            className="absolute top-0 left-0 right-0 h-[25vh] md:h-[30vh] z-[115] flex justify-center items-start pt-10 opacity-0 hover:opacity-100 transition-opacity duration-300 cursor-pointer bg-gradient-to-b from-red-950/60 to-transparent"
+            onClick={() => {
+               if (gameState === 'PLAYER_TURN' && showControls) {
+                   fireGun('dealer', 'player');
+                   (window as any).dealerDomHovered = false;
+               }
+            }}
+            onMouseEnter={() => { (window as any).dealerDomHovered = true; }}
+            onMouseLeave={() => { (window as any).dealerDomHovered = false; }}
+          >
+            <div className="font-mono text-xl md:text-2xl tracking-[0.4em] text-red-500 font-extrabold drop-shadow-[0_0_12px_rgba(255,0,0,0.85)]">SHOOT THE DEALER</div>
+          </div>
+          
+          {/* Bottom Edge: Shoot Self */}
+          <div 
+            className="absolute bottom-0 left-0 right-0 h-[25vh] md:h-[30vh] z-[115] flex justify-center items-end pb-10 opacity-0 hover:opacity-100 transition-opacity duration-300 cursor-pointer bg-gradient-to-t from-blue-950/60 to-transparent"
+            onClick={() => {
+               if (gameState === 'PLAYER_TURN' && showControls) {
+                   fireGun('player', 'player');
+               }
+            }}
+          >
+            <div className="font-mono text-xl md:text-2xl tracking-[0.4em] text-blue-500 font-extrabold drop-shadow-[0_0_12px_rgba(59,130,246,0.85)]">SHOOT YOURSELF</div>
+          </div>
+        </>
+      )}
+
        {/* KEYBOARD QUICK CONTROLS HUD */}
       {inputType !== 'gamepad' && getControllerSettings().showKeyboardHud !== false && (showControls || isLookingAtShopRef.current) && (
         <motion.div
@@ -6437,7 +6543,7 @@ export function Arena3D({
           transition={{ duration: 0.35, ease: 'easeInOut' }}
         >
           <div className="flex items-center gap-1.5 text-neutral-300">
-            <span className="frosted-glass-item text-red-400 px-1.5 py-0.5 border border-red-800/80 font-extrabold">S / ←</span>
+            <span className="frosted-glass-item text-blue-400 px-1.5 py-0.5 border border-blue-800/80 font-extrabold">S / ←</span>
             <span className="text-neutral-300 font-semibold uppercase">SHOOT SELF</span>
           </div>
           <span className="text-neutral-700">|</span>
