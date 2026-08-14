@@ -4,6 +4,10 @@ import { WebGPURenderer, RenderPipeline } from 'three/webgpu';
 import { pass } from 'three/tsl';
 import { fsr1 } from 'three/examples/jsm/tsl/display/FSR1Node.js';
 import { sharpen } from 'three/examples/jsm/tsl/display/SharpenNode.js';
+import { WebGPUComputeBloodSystem } from '../graphics/WebGPUComputeBlood';
+import { WebGPUComputeSparksSystem } from '../graphics/WebGPUComputeSparks';
+import { WebGPUVolumetricSmokeSystem } from '../graphics/WebGPUVolumetricSmoke';
+import { WebGPUAdvancedPipeline } from '../graphics/WebGPUAdvancedPipeline';
 import { motion } from 'motion/react';
 import { GameState, Chamber, PlayerState, ItemType, Difficulty } from '../types';
 import { getItemPrice, ITEM_METADATA, getRarityTagHtml } from '../gameData';
@@ -101,15 +105,13 @@ export function Arena3D({
 }: Arena3DProps) {
   const [inputType, setInputType] = useState<'kbm' | 'gamepad'>('kbm');
   const [graphics, setGraphics] = useState({
-      antiAliasing: 'smaa',
-      postProcessing: 'cinematic',
-      shadowQuality: 'high',
-      textureFiltering: 8,
+      antiAliasing: 'fxaa',
+      postProcessing: 'low',
+      shadowQuality: 'low',
+      textureFiltering: 2,
       materialEnhancements: true,
-      bloomIntensity: 0.4,
-      dofEnabled: true,
-      lensFlaresEnabled: true,
-      polygonCount: 'high'
+      bloomIntensity: 0.2,
+      polygonCount: 'low'
   });
 
   useEffect(() => {
@@ -118,28 +120,24 @@ export function Arena3D({
        const initialSettings = getControllerSettings();
        setInputType(initialSettings.inputType || 'kbm');
        setGraphics({
-           antiAliasing: initialSettings.antiAliasing || 'smaa',
-           postProcessing: initialSettings.postProcessing || 'cinematic',
-           shadowQuality: initialSettings.shadowQuality || 'high',
-           textureFiltering: initialSettings.textureFiltering || 8,
+           antiAliasing: initialSettings.antiAliasing || 'fxaa',
+           postProcessing: initialSettings.postProcessing || 'low',
+           shadowQuality: initialSettings.shadowQuality || 'low',
+           textureFiltering: initialSettings.textureFiltering || 2,
            materialEnhancements: initialSettings.materialEnhancements !== false,
-           bloomIntensity: initialSettings.bloomIntensity ?? 0.4,
-           dofEnabled: initialSettings.dofEnabled !== false,
-           lensFlaresEnabled: initialSettings.lensFlaresEnabled !== false,
-           polygonCount: initialSettings.polygonCount || 'high'
+           bloomIntensity: initialSettings.bloomIntensity ?? 0.2,
+           polygonCount: initialSettings.polygonCount || 'low'
        });
        subscribeControllerSettings(s => {
           setInputType(s.inputType);
           setGraphics({
-             antiAliasing: s.antiAliasing || 'smaa',
-             postProcessing: s.postProcessing || 'cinematic',
-             shadowQuality: s.shadowQuality || 'high',
-             textureFiltering: s.textureFiltering || 8,
+             antiAliasing: s.antiAliasing || 'fxaa',
+             postProcessing: s.postProcessing || 'low',
+             shadowQuality: s.shadowQuality || 'low',
+             textureFiltering: s.textureFiltering || 2,
              materialEnhancements: s.materialEnhancements !== false,
-             bloomIntensity: s.bloomIntensity ?? 0.4,
-             dofEnabled: s.dofEnabled !== false,
-             lensFlaresEnabled: s.lensFlaresEnabled !== false,
-             polygonCount: s.polygonCount || 'high'
+             bloomIntensity: s.bloomIntensity ?? 0.2,
+             polygonCount: s.polygonCount || 'low'
           });
        });
     });
@@ -171,12 +169,12 @@ export function Arena3D({
   const [screenSplats, setScreenSplats] = useState<ScreenSplat[]>([]);
   const splatIdCounter = useRef(0);
 
-  const spawnScreenSplat = () => {
+    const spawnScreenSplat = () => {
     const s = getControllerSettings();
     if (s.bloodEffectsEnabled === false) return;
     const id = splatIdCounter.current++;
-    const pQuality = s.particleQuality || 'high';
-    const isLow = pQuality === 'low' || pQuality === 'off';
+    const pQuality = s.particleQuality || 'low';
+    const isLow = pQuality === 'low';
     const newSplat: ScreenSplat = {
       id,
       x: Math.random() * 80 + 10,
@@ -363,6 +361,10 @@ export function Arena3D({
     hasThumpedPlayerTable: false,
     hasThumpedDealerFall: false,
     dealerDeathStartTime: 0,
+    previousRoundsSurvived: -1,
+    wasPlayerDead: false,
+    wasDealerDead: false,
+    hasInitializedRound: false,
     smoothMouseX: 0,
     smoothMouseY: 0,
     instantiatedPlayerCount: 0,
@@ -689,10 +691,12 @@ export function Arena3D({
           const glassGeo = new THREE.CylinderGeometry(0.12, 0.12, 0.012, 16);
           const glassMat = new THREE.MeshStandardMaterial({
             color: 0xf0f9ff,
-            metalness: 0.1,
-            roughness: 0.02,
+            metalness: 0.6,
+            roughness: 0.05,
             transparent: true,
-            opacity: 0.35,
+            opacity: 0.25,
+            depthWrite: true,
+            envMapIntensity: 1.5,
           });
           const glassMesh = new THREE.Mesh(glassGeo, glassMat);
           glassMesh.rotation.x = Math.PI / 2;
@@ -703,10 +707,11 @@ export function Arena3D({
           const bevelGeo = new THREE.TorusGeometry(0.12, 0.005, 6, 16);
           const bevelMat = new THREE.MeshStandardMaterial({
             color: 0xffffff,
-            metalness: 0.2,
-            roughness: 0.0,
+            metalness: 0.4,
+            roughness: 0.02,
             transparent: true,
             opacity: 0.6,
+            depthWrite: true,
           });
           const bevelMesh = new THREE.Mesh(bevelGeo, bevelMat);
           bevelMesh.position.set(0, 0.25, 0.008);
@@ -1047,12 +1052,12 @@ export function Arena3D({
             bladeGroup.add(corner);
           });
 
-          // Dried blood encrustations & rust stains along primary cut edge
+          // Fresh glistening blood stains along primary cut edge with SSR reflections
           const bloodStainGeo = new THREE.BoxGeometry(0.03, 0.004, 0.18);
           const matBloodStain = new THREE.MeshStandardMaterial({
-            color: 0x660000,
-            roughness: 0.9,
-            metalness: 0.1
+            color: 0x5a0000,
+            roughness: 0.06,
+            metalness: 0.22
           });
           const bloodStain = new THREE.Mesh(bloodStainGeo, matBloodStain);
           bloodStain.position.set(-0.06, 0.001, 0.02);
@@ -1146,6 +1151,11 @@ export function Arena3D({
     let currentPostprocessingKey = '';
     let currentPostprocessingNode: any = null;
 
+    let advancedPipeline: WebGPUAdvancedPipeline | null = null;
+    let computeBloodSystem: WebGPUComputeBloodSystem | null = null;
+    let computeSparksSystem: WebGPUComputeSparksSystem | null = null;
+    let volumetricSmokeSystem: WebGPUVolumetricSmokeSystem | null = null;
+
     const initRenderer = async () => {
       setWebGpuError(null);
       webGpuErrorRef.current = null;
@@ -1171,8 +1181,12 @@ export function Arena3D({
         try {
           scenePass = pass(scene, camera);
           renderPipeline = new RenderPipeline(r);
+          advancedPipeline = new WebGPUAdvancedPipeline(r, scene, camera);
+          computeBloodSystem = new WebGPUComputeBloodSystem(scene);
+          computeSparksSystem = new WebGPUComputeSparksSystem(scene);
+          volumetricSmokeSystem = new WebGPUVolumetricSmokeSystem(scene);
         } catch (e) {
-          console.warn('WebGPU RenderPipeline setup error:', e);
+          console.warn('WebGPU Advanced Pipeline / Compute setup error:', e);
         }
 
         if (!(r as any).getCurrentViewport) {
@@ -1230,82 +1244,6 @@ export function Arena3D({
     // Flashing hanging focus spotlight
     const spotLight = new THREE.SpotLight(0xfff5e6, 25.0, 30, Math.PI / 3, 0.7, 1);
     
-    // Anamorphic Lens Flare
-    const createAnamorphicFlareTexture = () => {
-      const canvas = document.createElement('canvas');
-      canvas.width = 1024;
-      canvas.height = 64;
-      const ctx = canvas.getContext('2d')!;
-      
-      const gradient = ctx.createLinearGradient(0, 32, 1024, 32);
-      gradient.addColorStop(0, 'rgba(0,0,0,0)');
-      gradient.addColorStop(0.3, 'rgba(60, 120, 255, 0.0)');
-      gradient.addColorStop(0.45, 'rgba(100, 150, 255, 0.6)');
-      gradient.addColorStop(0.5, 'rgba(255, 255, 255, 1)');
-      gradient.addColorStop(0.55, 'rgba(100, 150, 255, 0.6)');
-      gradient.addColorStop(0.7, 'rgba(60, 120, 255, 0.05)');
-      gradient.addColorStop(1, 'rgba(0,0,0,0)');
-      ctx.fillStyle = gradient;
-      ctx.fillRect(0, 0, 1024, 64);
-      return new THREE.CanvasTexture(canvas);
-    };
-    
-    const createCircularFlare = () => {
-       const canvas = document.createElement('canvas');
-       canvas.width = 256; canvas.height = 256;
-       const ctx = canvas.getContext('2d')!;
-       const gradient = ctx.createRadialGradient(128, 128, 0, 128, 128, 128);
-       gradient.addColorStop(0, 'rgba(255,255,255,1)');
-       gradient.addColorStop(0.1, 'rgba(200,220,255,0.8)');
-       gradient.addColorStop(1, 'rgba(0,0,0,0)');
-       ctx.fillStyle = gradient;
-       ctx.fillRect(0, 0, 256, 256);
-       return new THREE.CanvasTexture(canvas);
-    };
-
-    const anamorphicTexture = createAnamorphicFlareTexture();
-    const circularTexture = createCircularFlare();
-    const lensflareGroup = new THREE.Group();
-    
-    // Main anamorphic streak
-    const streakMat = new THREE.SpriteMaterial({
-      map: anamorphicTexture,
-      blending: THREE.AdditiveBlending,
-      transparent: true,
-      opacity: 0.9,
-      depthWrite: false,
-    });
-    const streakSprite = new THREE.Sprite(streakMat);
-    streakSprite.scale.set(16, 0.8, 1);
-    lensflareGroup.add(streakSprite);
-
-    // Additional circular artifacts
-    const cMat1 = new THREE.SpriteMaterial({
-      map: circularTexture,
-      blending: THREE.AdditiveBlending,
-      transparent: true,
-      opacity: 0.5,
-      depthWrite: false,
-    });
-    const cSprite1 = new THREE.Sprite(cMat1);
-    cSprite1.scale.set(1.2, 1.2, 1);
-    cSprite1.position.set(0, 0, -0.2);
-    lensflareGroup.add(cSprite1);
-
-    const cMat2 = new THREE.SpriteMaterial({
-      map: circularTexture,
-      blending: THREE.AdditiveBlending,
-      transparent: true,
-      opacity: 0.35,
-      depthWrite: false,
-    });
-    const cSprite2 = new THREE.Sprite(cMat2);
-    cSprite2.scale.set(0.8, 0.8, 1);
-    cSprite2.position.set(0, 0, -0.5);
-    lensflareGroup.add(cSprite2);
-    
-    spotLight.add(lensflareGroup);
-
     spotLight.position.set(0, 5, 0);
     spotLight.castShadow = true;
     spotLight.shadow.mapSize.width = 512;
@@ -2103,39 +2041,39 @@ export function Arena3D({
 
     const sharedBloodMat = new THREE.MeshStandardMaterial({ 
       color: 0xffffff, 
-      roughness: 0.65, 
-      metalness: 0.0,
-      flatShading: true,
+      roughness: 0.14, 
+      metalness: 0.08,
+      flatShading: false,
       transparent: true,
       opacity: 1.0,
-      depthWrite: false
+      depthWrite: true
     });
     const sharedDarkBloodMat = new THREE.MeshStandardMaterial({ 
       color: 0xffffff, 
-      roughness: 0.65, 
-      metalness: 0.0,
-      flatShading: true,
+      roughness: 0.22, 
+      metalness: 0.05,
+      flatShading: false,
       transparent: true,
       opacity: 1.0,
-      depthWrite: false
+      depthWrite: true
     });
     const sharedBrightBloodMat = new THREE.MeshStandardMaterial({ 
       color: 0xffffff, 
-      roughness: 0.65, 
-      metalness: 0.0,
-      flatShading: true,
+      roughness: 0.12, 
+      metalness: 0.10,
+      flatShading: false,
       transparent: true,
       opacity: 1.0,
-      depthWrite: false
+      depthWrite: true
     });
     const sharedAirborneBloodMat = new THREE.MeshStandardMaterial({ 
-      color: 0x2a0000, 
-      roughness: 0.65, 
-      metalness: 0.0,
-      flatShading: true,
+      color: 0x240202, 
+      roughness: 0.16, 
+      metalness: 0.08,
+      flatShading: false,
       transparent: true,
       opacity: 1.0,
-      depthWrite: false
+      depthWrite: true
     });
     const sharedSparkMat = new THREE.MeshBasicMaterial({ 
       color: 0xffcc00 
@@ -2356,6 +2294,23 @@ export function Arena3D({
     let landedDarkCount = 0;
     let landedBrightCount = 0;
 
+    interface LandedSplatData {
+      birthTime: number;
+      initialR: number;
+      initialG: number;
+      initialB: number;
+      targetR: number;
+      targetG: number;
+      targetB: number;
+      pos: THREE.Vector3;
+      rotY: number;
+      baseScale: THREE.Vector3;
+    }
+
+    const landedCoreSplats: LandedSplatData[] = [];
+    const landedDarkSplats: LandedSplatData[] = [];
+    const landedBrightSplats: LandedSplatData[] = [];
+
     const dummyMatrix = new THREE.Matrix4();
     const dummyQuat = new THREE.Quaternion();
     const dummyEuler = new THREE.Euler();
@@ -2371,25 +2326,59 @@ export function Arena3D({
       dummyQuat.setFromEuler(dummyEuler);
       dummyMatrix.compose(pos, dummyQuat, scale);
 
-      const col = new THREE.Color(colorHex);
+      // Realistic, gritty, dark visceral blood (avoid neon/bright crimson, keep it deep, dark and gritty)
+      const freshCol = new THREE.Color(colorHex);
+      if (colorHex === 0x2a0000 || colorHex === 0x8b0000 || colorHex === 0x3a0000) {
+        // Deep gritty dark venous/arterial red (approx #320303 - #3f0404)
+        const darkRed = 0.20 + Math.random() * 0.08;
+        const darkGreen = 0.008 + Math.random() * 0.006;
+        const darkBlue = 0.008 + Math.random() * 0.006;
+        freshCol.setRGB(darkRed, darkGreen, darkBlue);
+      } else {
+        // Normalize any explicit hex to stay within gritty dark realistic bounds
+        freshCol.r = Math.min(0.28, freshCol.r * 0.45);
+        freshCol.g = Math.min(0.015, freshCol.g * 0.3);
+        freshCol.b = Math.min(0.015, freshCol.b * 0.3);
+      }
+
+      // Calculate realistic aged oxidized target color (congealed, dried dark brownish-black scab/crust)
+      const targetR = Math.max(0.038, freshCol.r * 0.22 + (Math.random() * 0.01));
+      const targetG = Math.max(0.008, freshCol.g * 0.4 + 0.003); // natural rust/brownish oxidation
+      const targetB = Math.max(0.005, freshCol.b * 0.3);
+
+      const splatData: LandedSplatData = {
+        birthTime: animRef.current.time,
+        initialR: freshCol.r,
+        initialG: freshCol.g,
+        initialB: freshCol.b,
+        targetR,
+        targetG,
+        targetB,
+        pos: pos.clone(),
+        rotY,
+        baseScale: scale.clone()
+      };
 
       if (type === 'CORE' && landedCoreCount < MAX_LANDED_BLOOD) {
         landedCoreBloodIM.setMatrixAt(landedCoreCount, dummyMatrix);
-        landedCoreBloodIM.setColorAt(landedCoreCount, col);
+        landedCoreBloodIM.setColorAt(landedCoreCount, freshCol);
+        landedCoreSplats[landedCoreCount] = splatData;
         landedCoreCount++;
         landedCoreBloodIM.count = landedCoreCount;
         landedCoreBloodIM.instanceMatrix.needsUpdate = true;
         if (landedCoreBloodIM.instanceColor) landedCoreBloodIM.instanceColor.needsUpdate = true;
       } else if (type === 'DARK' && landedDarkCount < MAX_LANDED_BLOOD) {
         landedDarkBloodIM.setMatrixAt(landedDarkCount, dummyMatrix);
-        landedDarkBloodIM.setColorAt(landedDarkCount, col);
+        landedDarkBloodIM.setColorAt(landedDarkCount, freshCol);
+        landedDarkSplats[landedDarkCount] = splatData;
         landedDarkCount++;
         landedDarkBloodIM.count = landedDarkCount;
         landedDarkBloodIM.instanceMatrix.needsUpdate = true;
         if (landedDarkBloodIM.instanceColor) landedDarkBloodIM.instanceColor.needsUpdate = true;
       } else if (type === 'BRIGHT' && landedBrightCount < MAX_LANDED_BLOOD) {
         landedBrightBloodIM.setMatrixAt(landedBrightCount, dummyMatrix);
-        landedBrightBloodIM.setColorAt(landedBrightCount, col);
+        landedBrightBloodIM.setColorAt(landedBrightCount, freshCol);
+        landedBrightSplats[landedBrightCount] = splatData;
         landedBrightCount++;
         landedBrightBloodIM.count = landedBrightCount;
         landedBrightBloodIM.instanceMatrix.needsUpdate = true;
@@ -2425,16 +2414,83 @@ export function Arena3D({
       bounceCount: number;
     }[] = [];
 
+    // --- DYNAMIC BLOOD AGING SYSTEM ---
+    // Slowly congeals and oxidizes blood over time: from fresh glistening arterial crimson to dark, coagulated, dried scab crust
+    const tempAgeCol = new THREE.Color();
+    const BLOOD_OXIDATION_TIME = 35.0; // Seconds to reach mature dried blood stage
+
+    const updateBloodAging = (currentTime: number) => {
+      let coreUpdated = false;
+      for (let i = 0; i < landedCoreCount; i++) {
+        const s = landedCoreSplats[i];
+        if (!s) continue;
+        const age = Math.max(0, currentTime - s.birthTime);
+        const t = Math.min(1.0, 1.0 - Math.exp(-age / (BLOOD_OXIDATION_TIME * 0.45)));
+        if (t > 0.002) {
+          const r = s.initialR + (s.targetR - s.initialR) * t;
+          const g = s.initialG + (s.targetG - s.initialG) * t;
+          const b = s.initialB + (s.targetB - s.initialB) * t;
+          tempAgeCol.setRGB(r, g, b);
+          landedCoreBloodIM.setColorAt(i, tempAgeCol);
+          coreUpdated = true;
+        }
+      }
+      if (coreUpdated && landedCoreBloodIM.instanceColor) {
+        landedCoreBloodIM.instanceColor.needsUpdate = true;
+      }
+
+      let darkUpdated = false;
+      for (let i = 0; i < landedDarkCount; i++) {
+        const s = landedDarkSplats[i];
+        if (!s) continue;
+        const age = Math.max(0, currentTime - s.birthTime);
+        const t = Math.min(1.0, 1.0 - Math.exp(-age / (BLOOD_OXIDATION_TIME * 0.45)));
+        if (t > 0.002) {
+          const r = s.initialR + (s.targetR - s.initialR) * t;
+          const g = s.initialG + (s.targetG - s.initialG) * t;
+          const b = s.initialB + (s.targetB - s.initialB) * t;
+          tempAgeCol.setRGB(r, g, b);
+          landedDarkBloodIM.setColorAt(i, tempAgeCol);
+          darkUpdated = true;
+        }
+      }
+      if (darkUpdated && landedDarkBloodIM.instanceColor) {
+        landedDarkBloodIM.instanceColor.needsUpdate = true;
+      }
+
+      let brightUpdated = false;
+      for (let i = 0; i < landedBrightCount; i++) {
+        const s = landedBrightSplats[i];
+        if (!s) continue;
+        const age = Math.max(0, currentTime - s.birthTime);
+        const t = Math.min(1.0, 1.0 - Math.exp(-age / (BLOOD_OXIDATION_TIME * 0.45)));
+        if (t > 0.002) {
+          const r = s.initialR + (s.targetR - s.initialR) * t;
+          const g = s.initialG + (s.targetG - s.initialG) * t;
+          const b = s.initialB + (s.targetB - s.initialB) * t;
+          tempAgeCol.setRGB(r, g, b);
+          landedBrightBloodIM.setColorAt(i, tempAgeCol);
+          brightUpdated = true;
+        }
+      }
+      if (brightUpdated && landedBrightBloodIM.instanceColor) {
+        landedBrightBloodIM.instanceColor.needsUpdate = true;
+      }
+    };
+
     const clearBloodSplatters = () => {
       sharedBloodMat.opacity = 1.0;
       sharedDarkBloodMat.opacity = 1.0;
       sharedBrightBloodMat.opacity = 1.0;
       sharedAirborneBloodMat.opacity = 1.0;
       
-      // 1. Reset instanced landed blood counts
+      // 1. Reset instanced landed blood counts and splat metadata
       landedCoreCount = 0;
       landedDarkCount = 0;
       landedBrightCount = 0;
+      landedCoreSplats.length = 0;
+      landedDarkSplats.length = 0;
+      landedBrightSplats.length = 0;
       landedCoreBloodIM.count = 0;
       landedDarkBloodIM.count = 0;
       landedBrightBloodIM.count = 0;
@@ -2486,12 +2542,11 @@ export function Arena3D({
       const isBloodEnabled = ctrlSettings.bloodEffectsEnabled !== false;
 
       // Particle Quality Density Multiplier
-      const pQuality = ctrlSettings.particleQuality || 'high';
+      const pQuality = ctrlSettings.particleQuality || 'low';
       let pMult = 1.0;
       switch (pQuality) {
-        case 'off': pMult = 0.0; break;
-        case 'low': pMult = 0.25; break;
-        case 'medium': pMult = 0.50; break;
+        case 'low': pMult = 0.35; break;
+        case 'medium': pMult = 0.65; break;
         case 'high': pMult = 1.0; break;
         case 'ultra': pMult = 1.75; break;
       }
@@ -2501,20 +2556,53 @@ export function Arena3D({
         particleColor = 0x2a0000;
         if (count <= 0) count = 1;
       } else if (type === 'SMOKE') {
-        if (pMult === 0) return;
         count = Math.max(1, Math.min(18, Math.round(count * Math.min(1.25, pMult))));
       } else {
         // Non-blood particles (SPARK, DEBRIS, LIQUID) obey settings
-        if (pMult === 0) {
-          if (type !== 'SHELL' && type !== 'BULLET') {
-            return;
-          }
-        } else {
-          count = Math.max(1, Math.round(count * pMult));
-        }
+        count = Math.max(1, Math.round(count * pMult));
       }
 
       if (count <= 0) return;
+
+      // WebGPU Compute Shader Particle Bursts
+      if (type === 'BLOOD' && computeBloodSystem && ctrlSettings.gpuComputePhysics !== false) {
+        const spreadFactor = count > 100 ? 1.0 : 0.45;
+        const dir = new THREE.Vector3(
+          (Math.random() - 0.5) * spreadFactor,
+          Math.random() * 0.8 + 0.3,
+          (Math.random() - 0.5) * spreadFactor
+        ).normalize();
+        computeBloodSystem.emitBurst(
+          origin,
+          dir,
+          Math.min(Math.round(count * 2.5), 512),
+          speed * 18.0,
+          spreadFactor,
+          count > 100 ? 9.0 : 5.0
+        );
+      } else if (type === 'SPARK' && computeSparksSystem && ctrlSettings.gpuComputePhysics !== false) {
+        const dir = new THREE.Vector3(
+          (Math.random() - 0.5) * 0.8,
+          Math.random() * 0.9 + 0.2,
+          (Math.random() - 0.5) * 0.8
+        ).normalize();
+        computeSparksSystem.emitSparks(
+          origin,
+          dir,
+          Math.min(Math.round(count * 2.0), 128),
+          speed * 20.0,
+          0.8,
+          1.2
+        );
+      } else if (type === 'SMOKE' && volumetricSmokeSystem && ctrlSettings.volumetricSmokeEnabled !== false) {
+        volumetricSmokeSystem.emitPuff(
+          origin,
+          new THREE.Vector3(0, 0.4, 0),
+          Math.min(Math.round(count * 1.5), 32),
+          speed * 3.0,
+          4.5
+        );
+      }
 
       // 1. Psychological horror camera lens pixelated blood splash! Triggered on massive gunshot hits
       if (type === 'BLOOD' && count >= 125) {
@@ -2792,13 +2880,12 @@ export function Arena3D({
       const sharpening = graphics.webGpuSharpening !== undefined ? graphics.webGpuSharpening : 0.6;
 
       // Determine internal render scale from preset
-      let scale = 1.0;
+      let scale = 0.67;
       switch (upscalingPreset) {
         case 'ultra_quality': scale = 0.88; break;
         case 'quality': scale = 0.77; break;
         case 'balanced': scale = 0.67; break;
         case 'performance': scale = 0.50; break;
-        case 'off': default: scale = 1.0; break;
       }
 
       if (scenePass && typeof scenePass.setResolutionScale === 'function') {
@@ -2808,7 +2895,9 @@ export function Arena3D({
       // Convert user sharpening slider (0.0..1.0) to RCAS sharpness (0.0 = max, 2.0 = none)
       const rcasSharpness = Math.max(0.0, (1.0 - sharpening) * 1.8);
 
-      if (renderPipeline && scenePass) {
+      if (advancedPipeline) {
+        advancedPipeline.rebuildGraph(graphics, scale);
+      } else if (renderPipeline && scenePass) {
         const postKey = `${upscalingPreset}_${sharpening}_${rcasSharpness.toFixed(2)}`;
         if (postKey !== currentPostprocessingKey) {
           currentPostprocessingKey = postKey;
@@ -2816,13 +2905,7 @@ export function Arena3D({
             if (currentPostprocessingNode && currentPostprocessingNode !== scenePass && typeof currentPostprocessingNode.dispose === 'function') {
               try { currentPostprocessingNode.dispose(); } catch (e) {}
             }
-            if (upscalingPreset !== 'off') {
-              currentPostprocessingNode = fsr1(scenePass, rcasSharpness);
-            } else if (sharpening > 0) {
-              currentPostprocessingNode = sharpen(scenePass, rcasSharpness);
-            } else {
-              currentPostprocessingNode = scenePass;
-            }
+            currentPostprocessingNode = fsr1(scenePass, rcasSharpness);
             renderPipeline.outputNode = currentPostprocessingNode;
             renderPipeline.needsUpdate = true;
           } catch (e) {
@@ -2858,10 +2941,9 @@ export function Arena3D({
          
          // Material enhancements & Anisotropic filtering
          // Calculate reflection intensity based on reflectionQuality setting
-         const refQuality = graphics.reflectionQuality || 'high';
-         let envIntensity = 1.0;
+         const refQuality = graphics.reflectionQuality || 'low';
+         let envIntensity = 0.25;
          switch (refQuality) {
-           case 'off': envIntensity = 0.0; break;
            case 'low': envIntensity = 0.25; break;
            case 'medium': envIntensity = 0.65; break;
            case 'high': envIntensity = 1.0; break;
@@ -2876,15 +2958,13 @@ export function Arena3D({
                mat.map.needsUpdate = true;
            }
            if (mat.roughness !== undefined) {
-               mat.envMapIntensity = graphics.materialEnhancements ? envIntensity : (refQuality === 'off' ? 0.0 : envIntensity * 0.5);
+               mat.envMapIntensity = graphics.materialEnhancements ? envIntensity : envIntensity * 0.5;
                mat.needsUpdate = true;
            }
          }
       });
 
       // Configure Compositor Passes
-      if (lensflareGroup) lensflareGroup.visible = graphics.lensFlaresEnabled;
-
       if (renderer) {
         renderer.setSize(w, h, false);
       }
@@ -3241,38 +3321,31 @@ export function Arena3D({
       frameId = requestAnimationFrame(animate);
       const now = performance.now();
       let frameDiffMs = now - lastFrameTime;
-      if (frameDiffMs > 150) {
+      if (frameDiffMs > 250) {
         // Prevent huge frame jumps after tab switching or temporary system freeze
         frameDiffMs = 16.6;
       }
-      const rawDt = Math.max(0.001, Math.min(frameDiffMs / 1000, 0.05));
+      // Allow rawDt to accurately reflect real elapsed time down to 5 FPS (0.20s),
+      // ensuring animations and movement remain buttery smooth and 100% real-time speed at 20 FPS and lower.
+      const rawDt = Math.max(0.001, Math.min(frameDiffMs / 1000, 0.20));
       lastFrameTime = now;
 
       ar.tickCount++;
       ar.time += rawDt * 1.25;
       const time = ar.time;
-      const deltaScale = Math.min(rawDt * 60, 2.5); // Cap deltaScale so physics remain stable on low framerates
+      // Exact framerate-scaling factor (1.0 = 60 FPS, 3.0 = 20 FPS, 6.0 = 10 FPS)
+      const deltaScale = rawDt * 60.0;
 
       const damp = (factor: number) => {
-        const clampedFactor = Math.min(0.99, Math.max(0.01, factor));
+        const clampedFactor = Math.min(0.999, Math.max(0.001, factor));
         return 1 - Math.pow(1 - clampedFactor, deltaScale);
       };
 
       const latest = stateRef.current;
 
-      if (ar.isFadingBlood) {
-        ar.bloodFadeTimer += rawDt;
-        const fadeDuration = 2.0; // 2 seconds fade out
-        if (ar.bloodFadeTimer >= fadeDuration) {
-          ar.isFadingBlood = false;
-          clearBloodSplatters();
-        } else {
-          const fadeOpacity = 1.0 - (ar.bloodFadeTimer / fadeDuration);
-          sharedBloodMat.opacity = fadeOpacity;
-          sharedDarkBloodMat.opacity = fadeOpacity;
-          sharedBrightBloodMat.opacity = fadeOpacity;
-          sharedAirborneBloodMat.opacity = fadeOpacity;
-        }
+      // Update progressive blood oxidation & drying aging system
+      if (ar.tickCount % 2 === 0) {
+        updateBloodAging(time);
       }
 
       // Calculate frame-to-frame barrel/muzzle position delta for realistic fluid continuation
@@ -3500,25 +3573,55 @@ export function Arena3D({
         if (cursorEl) cursorEl.style.display = 'none';
       }
 
-      // Game round state changes & blood clearing
-      if (latest.gameState !== ar.previousGameState) {
-        if (
-          latest.gameState === 'LOADING' ||
-          latest.gameState === 'MENU' ||
-          latest.gameState === 'ROUND_OVER'
-        ) {
-          const isCylinderReload = ar.previousGameState === 'ROUND_OVER';
-          const isNextRoundAfterWin = ar.previousGameState === 'GAME_OVER' && latest.roundsSurvived > 0;
-          const isFadingTransition = isCylinderReload || isNextRoundAfterWin;
+      // Initialize starting state on first frame
+      if (!ar.hasInitializedRound) {
+        ar.previousRoundsSurvived = latest.roundsSurvived;
+        ar.wasPlayerDead = latest.player.health <= 0;
+        ar.wasDealerDead = latest.dealer.health <= 0;
+        ar.hasInitializedRound = true;
+      }
 
-          if (latest.gameState === 'LOADING' && isFadingTransition) {
-            ar.isFadingBlood = true;
-            ar.bloodFadeTimer = 0;
-          } else {
+      // Track death events
+      if (latest.player.health <= 0) {
+        ar.wasPlayerDead = true;
+      }
+      if (latest.dealer.health <= 0) {
+        ar.wasDealerDead = true;
+      }
+
+      // Game round state changes & blood clearing
+      // STRICT RULE: Only remove blood stains when:
+      // 1. Returning to the main MENU
+      // 2. The player respawns after dying (wasPlayerDead is true and now starts a new game / LOADING)
+      // 3. Starting a new round (after defeating the dealer: wasDealerDead is true and now LOADING next round, or roundsSurvived increases)
+      if (latest.gameState !== ar.previousGameState) {
+        if (latest.gameState === 'MENU') {
+          clearBloodSplatters();
+          ar.wasPlayerDead = false;
+          ar.wasDealerDead = false;
+          ar.previousRoundsSurvived = latest.roundsSurvived;
+        } else if (latest.gameState === 'LOADING') {
+          const isRespawnAfterDeath = ar.wasPlayerDead && latest.player.health > 0;
+          const isNewRoundAfterWin = ar.wasDealerDead || (latest.roundsSurvived > ar.previousRoundsSurvived);
+          const isFreshRunReset = ar.previousGameState === 'GAME_OVER' && latest.roundsSurvived === 0;
+
+          if (isRespawnAfterDeath || isNewRoundAfterWin || isFreshRunReset) {
             clearBloodSplatters();
+            ar.wasPlayerDead = false;
+            ar.wasDealerDead = false;
+            ar.previousRoundsSurvived = latest.roundsSurvived;
           }
+          // Note: If both survived and cylinder is reloaded, isRespawnAfterDeath and isNewRoundAfterWin are false.
+          // Blood stains on table and floor remain completely untouched and continue aging naturally!
         }
         ar.previousGameState = latest.gameState;
+      }
+
+      // Also detect if roundsSurvived increments while in game
+      if (latest.roundsSurvived > ar.previousRoundsSurvived && ar.previousRoundsSurvived >= 0) {
+        clearBloodSplatters();
+        ar.wasDealerDead = false;
+        ar.previousRoundsSurvived = latest.roundsSurvived;
       }
 
       // Rebuild components detection
@@ -3546,8 +3649,8 @@ export function Arena3D({
       bulbMesh.rotation.z = Math.sin(time * 0.7) * 0.08;
       wireMesh.rotation.z = Math.sin(time * 0.7) * 0.04;
 
-      // Dynamic lighting adjustment based on user brightness settings
-      const bMult = getControllerSettings().brightness ?? 1.0;
+      // Fixed baseline lighting (100% brightness)
+      const bMult = 1.0;
       ambientLight.intensity = 1.2 * bMult;
       fillLight.intensity = 1.5 * bMult;
 
@@ -6222,9 +6325,6 @@ export function Arena3D({
         if (ar.loadingAnimStartTime === 0) {
             ar.loadingAnimStartTime = Date.now();
             ar.bulletLoadedFlags = [false, false, false, false, false, false];
-            if (!ar.isFadingBlood) {
-              clearBloodSplatters();
-            }
         }
         const rawLoad = (Date.now() - ar.loadingAnimStartTime) / 1000;
         const loadElapsed = rawLoad * 1.3;
@@ -6317,7 +6417,35 @@ export function Arena3D({
         camera.rotation.z += ar.cameraKickRoll;
       }
 
-      if (renderPipeline) {
+      // Update WebGPU Compute Systems
+      if (computeBloodSystem && renderer) {
+        computeBloodSystem.update(renderer, rawDt, time);
+      }
+      if (computeSparksSystem && renderer) {
+        computeSparksSystem.update(renderer, rawDt);
+      }
+      if (volumetricSmokeSystem && renderer) {
+        volumetricSmokeSystem.update(renderer, rawDt, time, camera);
+      }
+
+      // Render with Advanced Pipeline (GTAO + SSR + Motion Blur + FSR1)
+      if (advancedPipeline) {
+        const recoilKick = Math.abs(ar.cameraKickPitch || 0) + Math.abs(ar.cameraKickRoll || 0);
+        advancedPipeline.updateFrame(
+          rawDt, 
+          stateRef.current.gameState, 
+          ar.aimProgress || 0, 
+          ar.cameraShake || 0, 
+          recoilKick
+        );
+        try {
+          advancedPipeline.render();
+        } catch (err) {
+          try {
+            if (renderer) renderer.render(scene, camera);
+          } catch (e) {}
+        }
+      } else if (renderPipeline) {
         try {
           renderPipeline.render();
         } catch (err) {
@@ -6342,6 +6470,10 @@ export function Arena3D({
       window.removeEventListener('mouseup', handleMouseUp);
       window.removeEventListener('keydown', handleKeyDown);
       document.body.style.cursor = '';
+      if (computeBloodSystem) computeBloodSystem.dispose(scene);
+      if (computeSparksSystem) computeSparksSystem.dispose(scene);
+      if (volumetricSmokeSystem) volumetricSmokeSystem.dispose(scene);
+      if (advancedPipeline) advancedPipeline.dispose();
       if (currentPostprocessingNode && currentPostprocessingNode !== scenePass && typeof currentPostprocessingNode.dispose === 'function') {
         try { currentPostprocessingNode.dispose(); } catch (e) {}
       }

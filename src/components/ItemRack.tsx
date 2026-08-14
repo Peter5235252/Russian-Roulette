@@ -28,7 +28,7 @@ export function ItemRack({ items, onUseItem, disabled, selectedIndex = -1, highl
   if (items.length === 0) return null;
 
   return (
-    <div className="flex gap-3 p-3.5 frosted-glass-ui rounded-none overflow-x-auto max-w-full">
+    <div className="flex gap-3 p-3.5 frosted-glass-ui rounded-none overflow-x-auto custom-scrollbar max-w-full">
       {items.map((item, index) => {
         const isSelected = highlightSelected && index === selectedIndex;
         return (

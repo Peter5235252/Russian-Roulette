@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { ChevronDown, Check } from 'lucide-react';
+import { IndustrialScrollArea } from './IndustrialScrollArea';
 
 export interface SelectOption<T extends string | number = string> {
   value: T;
@@ -21,6 +22,7 @@ export interface CustomSelectProps<T extends string | number = string> {
   optionClassName?: string;
   disabled?: boolean;
   align?: 'left' | 'right' | 'center';
+  showIndustrialScrollbar?: boolean;
 }
 
 export function CustomSelect<T extends string | number = string>({
@@ -33,7 +35,8 @@ export function CustomSelect<T extends string | number = string>({
   buttonClassName = '',
   optionClassName = '',
   disabled = false,
-  align = 'left'
+  align = 'left',
+  showIndustrialScrollbar = true
 }: CustomSelectProps<T>) {
   const [isOpen, setIsOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -89,13 +92,17 @@ export function CustomSelect<T extends string | number = string>({
       <button
         type="button"
         disabled={disabled}
-        onClick={() => setIsOpen((prev) => !prev)}
+        onClick={() => {
+          if (!disabled) setIsOpen((prev) => !prev);
+        }}
         onKeyDown={handleKeyDown}
-        className={`w-full min-h-[44px] bg-[#120b18]/80 border transition-all duration-150 rounded-none px-3 py-2.5 flex items-center justify-between gap-3 text-xs tracking-wider outline-none cursor-pointer ${
-          isOpen
-            ? 'border-red-600 shadow-[0_0_15px_rgba(220,38,38,0.25)] text-white'
-            : 'border-neutral-700/80 hover:border-neutral-500 text-neutral-200'
-        } ${disabled ? 'opacity-50 cursor-not-allowed' : ''} ${buttonClassName}`}
+        className={`w-full min-h-[44px] border transition-all duration-150 rounded-none px-3 py-2.5 flex items-center justify-between gap-3 text-xs tracking-wider outline-none ${
+          disabled
+            ? 'bg-neutral-950/90 border-neutral-900/90 text-neutral-500 opacity-50 cursor-not-allowed'
+            : isOpen
+            ? 'bg-[#120b18]/80 border-red-600 shadow-[0_0_15px_rgba(220,38,38,0.25)] text-white cursor-pointer'
+            : 'bg-[#120b18]/80 border-neutral-700/80 hover:border-neutral-500 text-neutral-200 cursor-pointer'
+        } ${buttonClassName}`}
       >
         <div className="flex items-center gap-2 truncate">
           <span
@@ -129,55 +136,100 @@ export function CustomSelect<T extends string | number = string>({
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -4, scale: 0.98 }}
             transition={{ duration: 0.12, ease: 'easeOut' }}
-            className={`absolute left-0 right-0 mt-1 z-50 frosted-glass-options-dropdown border-2 border-red-900/90 shadow-[0_20px_48px_rgba(0,0,0,0.95),0_0_30px_rgba(185,28,28,0.35)] max-h-60 overflow-y-auto custom-scrollbar ${
+            className={`absolute left-0 right-0 mt-1 z-50 frosted-glass-options-dropdown border-2 border-red-900/90 shadow-[0_20px_48px_rgba(0,0,0,0.95),0_0_30px_rgba(185,28,28,0.35)] overflow-hidden ${
               align === 'right' ? 'right-0 left-auto' : ''
             }`}
           >
             {/* Top decorative hazard accent line */}
             <div className="h-0.5 w-full bg-gradient-to-r from-red-600 via-neutral-200/40 to-red-600" />
 
-            <div className="p-1 space-y-0.5">
-              {options.map((option) => {
-                const isSelected = option.value === value;
-                return (
-                  <button
-                    key={String(option.value)}
-                    type="button"
-                    onClick={() => {
-                      onChange(option.value);
-                      setIsOpen(false);
-                    }}
-                    className={`w-full text-left px-3 py-2 flex items-center justify-between gap-2 text-xs cursor-pointer ${
-                      isSelected
-                        ? 'frosted-glass-option-selected text-white font-bold'
-                        : 'frosted-glass-option-item text-neutral-200 hover:text-white'
-                    } ${optionClassName}`}
-                  >
-                    <div className="flex flex-col gap-0.5 truncate">
-                      <div className="flex items-center gap-2 truncate">
-                        <span className={`truncate tracking-wider ${option.colorClass || ''}`}>
-                          {option.label}
-                        </span>
-                        {option.badge && (
-                          <span className="text-[9px] bg-red-950/80 text-red-400 border border-red-800 px-1 py-0.2 font-mono">
-                            {option.badge}
+            {showIndustrialScrollbar ? (
+              <IndustrialScrollArea className="max-h-60" viewportClassName="p-1 space-y-0.5" showSteppers={false}>
+                {options.map((option) => {
+                  const isSelected = option.value === value;
+                  return (
+                    <button
+                      key={String(option.value)}
+                      type="button"
+                      onClick={() => {
+                        onChange(option.value);
+                        setIsOpen(false);
+                      }}
+                      className={`w-full text-left px-3 py-2 flex items-center justify-between gap-2 text-xs cursor-pointer ${
+                        isSelected
+                          ? 'frosted-glass-option-selected text-white font-bold'
+                          : 'frosted-glass-option-item text-neutral-200 hover:text-white'
+                      } ${optionClassName}`}
+                    >
+                      <div className="flex flex-col gap-0.5 truncate">
+                        <div className="flex items-center gap-2 truncate">
+                          <span className={`truncate tracking-wider ${option.colorClass || ''}`}>
+                            {option.label}
+                          </span>
+                          {option.badge && (
+                            <span className="text-[9px] bg-red-950/80 text-red-400 border border-red-800 px-1 py-0.2 font-mono">
+                              {option.badge}
+                            </span>
+                          )}
+                        </div>
+                        {option.description && (
+                          <span className="text-[10px] text-neutral-300/80 font-sans tracking-normal font-normal">
+                            {option.description}
                           </span>
                         )}
                       </div>
-                      {option.description && (
-                        <span className="text-[10px] text-neutral-300/80 font-sans tracking-normal font-normal">
-                          {option.description}
-                        </span>
-                      )}
-                    </div>
 
-                    {isSelected && (
-                      <Check className="w-3.5 h-3.5 text-red-400 flex-shrink-0 ml-1 stroke-[3]" />
-                    )}
-                  </button>
-                );
-              })}
-            </div>
+                      {isSelected && (
+                        <Check className="w-3.5 h-3.5 text-red-400 flex-shrink-0 ml-1 stroke-[3]" />
+                      )}
+                    </button>
+                  );
+                })}
+              </IndustrialScrollArea>
+            ) : (
+              <div className="max-h-60 overflow-y-auto p-1 space-y-0.5 hide-scrollbar">
+                {options.map((option) => {
+                  const isSelected = option.value === value;
+                  return (
+                    <button
+                      key={String(option.value)}
+                      type="button"
+                      onClick={() => {
+                        onChange(option.value);
+                        setIsOpen(false);
+                      }}
+                      className={`w-full text-left px-3 py-2 flex items-center justify-between gap-2 text-xs cursor-pointer ${
+                        isSelected
+                          ? 'frosted-glass-option-selected text-white font-bold'
+                          : 'frosted-glass-option-item text-neutral-200 hover:text-white'
+                      } ${optionClassName}`}
+                    >
+                      <div className="flex flex-col gap-0.5 truncate">
+                        <div className="flex items-center gap-2 truncate">
+                          <span className={`truncate tracking-wider ${option.colorClass || ''}`}>
+                            {option.label}
+                          </span>
+                          {option.badge && (
+                            <span className="text-[9px] bg-red-950/80 text-red-400 border border-red-800 px-1 py-0.2 font-mono">
+                              {option.badge}
+                            </span>
+                          )}
+                        </div>
+                        {option.description && (
+                          <span className="text-[10px] text-neutral-300/80 font-sans tracking-normal font-normal">
+                            {option.description}
+                          </span>
+                        )}
+                      </div>
+
+                      {isSelected && (
+                        <Check className="w-3.5 h-3.5 text-red-400 flex-shrink-0 ml-1 stroke-[3]" />
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </motion.div>
         )}
       </AnimatePresence>

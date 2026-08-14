@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from "motion/react";
 import { Cylinder } from "./components/Cylinder";
 import { ItemRack } from "./components/ItemRack";
 import { SettingsPanel } from "./components/SettingsPanel";
+import { HardwareWarningModal } from "./components/HardwareWarningModal";
 import { Arena3D } from "./components/Arena3D";
 import { CustomCursor } from "./components/CustomCursor";
 import { useGameState } from "./hooks/useGameState";
@@ -11,6 +12,7 @@ import { CustomSelect, SelectOption } from "./components/CustomSelect";
 import { Difficulty } from "./types";
 import { Menu, AlertTriangle } from "lucide-react";
 import { getControllerSettings } from "./controller";
+import { detectGpuHardware, GpuDetectionResult } from "./utils/hardwareDetector";
 
 export const getDifficultyConfig = (diff: Difficulty) => {
   switch (diff) {
@@ -108,6 +110,8 @@ export default function App() {
   const [difficulty, setDifficulty] = useState<Difficulty>("NORMAL");
   const [inputType, setInputType] = useState<"kbm" | "gamepad">("kbm");
   const [bloodEffectsEnabled, setBloodEffectsEnabled] = useState(true);
+  const [gpuDetection, setGpuDetection] = useState<GpuDetectionResult | null>(null);
+  const [showHardwareWarning, setShowHardwareWarning] = useState(false);
 
   const diffConfig = getDifficultyConfig(difficulty);
 
@@ -128,6 +132,45 @@ export default function App() {
     }
     nightmareBlankCount = Math.max(0, unspentTotal - nightmareLiveCount);
   }
+
+  // WebGPU Hardware detection for integrated/low-end GPU advisory on each app init
+  useEffect(() => {
+    detectGpuHardware().then((result) => {
+      setGpuDetection(result);
+      if (result.isLowEndOrIntegrated) {
+        setShowHardwareWarning(true);
+        // Force "Low" graphics preset while retaining customizable FSR upscaling settings
+        import("./controller").then(({ getControllerSettings, setControllerSettings }) => {
+          const current = getControllerSettings();
+          setControllerSettings({
+            graphicsPreset: "Low",
+            antiAliasing: "fxaa",
+            postProcessing: "low",
+            shadowQuality: "low",
+            reflectionQuality: "low",
+            textureFiltering: 2,
+            materialEnhancements: true,
+            materialQuality: "low",
+            bloomIntensity: 0.15,
+            gtaoEnabled: true,
+            gtaoQuality: "low",
+            ssrEnabled: true,
+            ssrQuality: "low",
+            volumetricSmokeEnabled: true,
+            volumetricSmokeQuality: "low",
+            gpuComputePhysics: true,
+            computePhysicsQuality: "low",
+            motionBlurEnabled: true,
+            motionBlurQuality: "low",
+            polygonCount: "low",
+            particleQuality: "low",
+            webGpuUpscalingPreset: current.webGpuUpscalingPreset || "performance",
+            webGpuSharpening: current.webGpuSharpening !== undefined ? current.webGpuSharpening : 0.6,
+          });
+        });
+      }
+    });
+  }, []);
 
   useEffect(() => {
     import("./controller").then(
@@ -387,6 +430,21 @@ export default function App() {
         )}
       </AnimatePresence>
 
+      <AnimatePresence>
+        {showHardwareWarning && gpuDetection && (
+          <HardwareWarningModal
+            detection={gpuDetection}
+            onDismiss={() => {
+              setShowHardwareWarning(false);
+            }}
+            onOpenSettings={() => {
+              setShowHardwareWarning(false);
+              setIsSettingsOpen(true);
+            }}
+          />
+        )}
+      </AnimatePresence>
+
       {gameState === "MENU" ? (
         <div className="flex-1 flex flex-col items-center justify-center p-8 z-10 text-center">
           <h1
@@ -419,6 +477,7 @@ export default function App() {
                     ]}
                     value={difficulty}
                     onChange={(val) => setDifficulty(val)}
+                    showIndustrialScrollbar={false}
                     buttonClassName={`min-w-[200px] uppercase font-mono tracking-widest ${diffConfig.borderColor} ${diffConfig.bgColor} ${diffConfig.glowShadow}`}
                   />
                 </div>

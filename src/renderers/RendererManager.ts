@@ -31,10 +31,32 @@ export const createWebGPURenderer = async (canvas: HTMLCanvasElement) => {
     throw new Error(check.reason || 'WebGPU is disabled or unavailable.');
   }
 
+  const gpu = (navigator as any).gpu;
+  let requiredLimits: Record<string, number> = {};
+  if (gpu) {
+    try {
+      const adapter = await gpu.requestAdapter({ powerPreference: 'high-performance' });
+      if (adapter && adapter.limits) {
+        if (adapter.limits.maxColorAttachmentBytesPerSample) {
+          requiredLimits.maxColorAttachmentBytesPerSample = adapter.limits.maxColorAttachmentBytesPerSample;
+        }
+        if (adapter.limits.maxStorageBufferBindingSize) {
+          requiredLimits.maxStorageBufferBindingSize = adapter.limits.maxStorageBufferBindingSize;
+        }
+        if (adapter.limits.maxComputeWorkgroupStorageSize) {
+          requiredLimits.maxComputeWorkgroupStorageSize = adapter.limits.maxComputeWorkgroupStorageSize;
+        }
+      }
+    } catch (e) {
+      console.warn('Could not query WebGPU adapter limits:', e);
+    }
+  }
+
   const renderer = new WebGPURenderer({
     canvas,
     antialias: false,
     powerPreference: 'high-performance',
+    requiredLimits,
   });
 
   await (renderer as any).init();

@@ -59,7 +59,7 @@ async function queryAiProvider(
       apiKey: key,
       httpOptions: { headers: { "User-Agent": "aistudio-build" } }
     });
-    const model = modelName || "gemini-3.6-flash";
+    const model = modelName || "gemini-3.7-flash";
     const response = await aiClient.models.generateContent({
       model,
       contents: prompt,

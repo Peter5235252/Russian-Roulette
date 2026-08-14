@@ -1,23 +1,34 @@
 import { encryptApiKey, decryptApiKey, isEncrypted } from './utils/crypto';
 
-export type WebGpuUpscalingPreset = 'off' | 'ultra_quality' | 'quality' | 'balanced' | 'performance';
-export type ReflectionQuality = 'off' | 'low' | 'medium' | 'high' | 'ultra';
+export type WebGpuUpscalingPreset = 'ultra_quality' | 'quality' | 'balanced' | 'performance';
+export type ReflectionQuality = 'low' | 'medium' | 'high' | 'ultra';
+export type EffectQuality = 'low' | 'medium' | 'high' | 'ultra';
 export type AiProvider = 'gemini' | 'chatgpt' | 'claude' | 'grok' | 'mistral';
 
 export interface ControllerSettings {
   inputType: 'kbm' | 'gamepad';
-  graphicsPreset: 'Very Low' | 'Low' | 'Medium' | 'High' | 'Ultra' | 'Custom';
-  antiAliasing: 'none' | 'fxaa' | 'smaa';
+  graphicsPreset: 'Low' | 'Medium' | 'High' | 'Ultra' | 'Custom';
+  antiAliasing: 'fxaa' | 'smaa';
   postProcessing: 'low' | 'high' | 'cinematic';
   shadowQuality: 'low' | 'medium' | 'high' | 'ultra';
   reflectionQuality: ReflectionQuality;
   textureFiltering: 1 | 2 | 4 | 8 | 16;
   materialEnhancements: boolean;
+  materialQuality?: EffectQuality;
   bloomIntensity: number;
-  dofEnabled: boolean;
-  lensFlaresEnabled: boolean;
+  gtaoEnabled?: boolean;
+  gtaoQuality?: EffectQuality;
+  ssrEnabled?: boolean;
+  ssrQuality?: EffectQuality;
+  volumetricSmokeEnabled?: boolean;
+  volumetricSmokeQuality?: EffectQuality;
+  gpuComputePhysics?: boolean;
+  computePhysicsQuality?: EffectQuality;
+  motionBlurEnabled?: boolean;
+  motionBlurQuality?: EffectQuality;
+  motionBlurIntensity?: number;
   bloodEffectsEnabled: boolean;
-  particleQuality: 'off' | 'low' | 'medium' | 'high' | 'ultra';
+  particleQuality: 'low' | 'medium' | 'high' | 'ultra';
   brightness: number;
   rumbleEnabled: boolean;
   rumbleIntensity: number;
@@ -32,27 +43,37 @@ export interface ControllerSettings {
 }
 
 // Persist in localStorage with E2E encrypted API key
-const STORAGE_KEY = 'dealer_controller_settings_v8';
+const STORAGE_KEY = 'dealer_controller_settings_v9';
 
 const defaultSettings: ControllerSettings = {
   inputType: 'kbm',
-  graphicsPreset: 'High',
-  antiAliasing: 'smaa',
-  postProcessing: 'cinematic',
-  shadowQuality: 'high',
-  reflectionQuality: 'high',
-  textureFiltering: 8,
+  graphicsPreset: 'Low',
+  antiAliasing: 'fxaa',
+  postProcessing: 'low',
+  shadowQuality: 'low',
+  reflectionQuality: 'low',
+  textureFiltering: 2,
   materialEnhancements: true,
-  bloomIntensity: 0.4,
-  dofEnabled: true,
-  lensFlaresEnabled: true,
+  materialQuality: 'low',
+  bloomIntensity: 0.2,
+  gtaoEnabled: true,
+  gtaoQuality: 'low',
+  ssrEnabled: true,
+  ssrQuality: 'low',
+  volumetricSmokeEnabled: true,
+  volumetricSmokeQuality: 'low',
+  gpuComputePhysics: true,
+  computePhysicsQuality: 'low',
+  motionBlurEnabled: true,
+  motionBlurQuality: 'low',
+  motionBlurIntensity: 0.3,
   bloodEffectsEnabled: true,
-  particleQuality: 'high',
+  particleQuality: 'low',
   brightness: 1.0,
   rumbleEnabled: true,
   rumbleIntensity: 1.0,
-  polygonCount: 'high',
-  webGpuUpscalingPreset: 'quality',
+  polygonCount: 'low',
+  webGpuUpscalingPreset: 'balanced',
   webGpuSharpening: 0.6,
   useWebGPU: false,
   showKeyboardHud: true,
@@ -63,6 +84,8 @@ const defaultSettings: ControllerSettings = {
 
 let currentSettings: ControllerSettings = { ...defaultSettings };
 
+const listeners = new Set<(s: ControllerSettings) => void>();
+
 // Async initialization to load and decrypt settings
 (async () => {
   try {
@@ -72,6 +95,19 @@ let currentSettings: ControllerSettings = { ...defaultSettings };
       if (parsed.aiApiKey && isEncrypted(parsed.aiApiKey)) {
         parsed.aiApiKey = await decryptApiKey(parsed.aiApiKey);
       }
+      // Sanitize legacy "off" or "none" values to baseline "low" or "fxaa"
+      if (parsed.antiAliasing === 'none') parsed.antiAliasing = 'fxaa';
+      if (parsed.reflectionQuality === 'off') parsed.reflectionQuality = 'low';
+      if (parsed.particleQuality === 'off') parsed.particleQuality = 'low';
+      if (parsed.gtaoQuality === 'off') parsed.gtaoQuality = 'low';
+      if (parsed.ssrQuality === 'off') parsed.ssrQuality = 'low';
+      if (parsed.materialQuality === 'off') parsed.materialQuality = 'low';
+      if (parsed.volumetricSmokeQuality === 'off') parsed.volumetricSmokeQuality = 'low';
+      if (parsed.computePhysicsQuality === 'off') parsed.computePhysicsQuality = 'low';
+      if (parsed.motionBlurQuality === 'off') parsed.motionBlurQuality = 'low';
+      if (parsed.webGpuUpscalingPreset === 'off') parsed.webGpuUpscalingPreset = 'balanced';
+      parsed.brightness = 1.0;
+
       currentSettings = { ...defaultSettings, ...parsed };
       listeners.forEach(l => l(currentSettings));
     }
@@ -79,8 +115,6 @@ let currentSettings: ControllerSettings = { ...defaultSettings };
     console.warn("Failed to load or decrypt controller settings:", e);
   }
 })();
-
-const listeners = new Set<(s: ControllerSettings) => void>();
 
 export const getControllerSettings = () => currentSettings;
 
